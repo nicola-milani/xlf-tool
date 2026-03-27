@@ -24,12 +24,6 @@ jobs:
             add_data_sep: ":"
             extra_flags: ""
 
-          - os: macos-13
-            name: macos-x86_64
-            exe: xlf-translate
-            add_data_sep: ":"
-            extra_flags: "--windowed"
-
           - os: macos-latest
             name: macos-arm64
             exe: xlf-translate
