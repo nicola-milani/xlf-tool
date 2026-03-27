@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XLF Translator</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: system-ui, -apple-system, sans-serif;
+    font-size: 14px;
+    background: #f0f2f5;
+    color: #1a1a1a;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── Header ── */
+  header {
+    background: #1e3a5f;
+    color: #fff;
+    padding: 10px 18px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  header h1 { font-size: 18px; font-weight: 600; }
+  #badge-version {
+    background: #3a7bd5;
+    color: #fff;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 12px;
+    display: none;
+  }
+  #lbl-original { color: #a8c4e8; font-size: 12px; margin-left: auto; }
+
+  /* ── Layout ── */
+  .layout {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ── */
+  aside {
+    width: 260px;
+    min-width: 220px;
+    background: #fff;
+    border-right: 1px solid #dde1e7;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    overflow-y: auto;
+    flex-shrink: 0;
+  }
+  .section {
+    padding: 14px 14px 10px;
+    border-bottom: 1px solid #eef0f3;
+  }
+  .section-title {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    color: #7a8394;
+    letter-spacing: .5px;
+    margin-bottom: 10px;
+  }
+  label { display: block; font-size: 12px; color: #555; margin-bottom: 3px; margin-top: 8px; }
+  label:first-of-type { margin-top: 0; }
+  input[type=text], select {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+    font-size: 13px;
+    background: #fafafa;
+  }
+  input[type=text]:focus, select:focus { outline: 2px solid #3a7bd5; border-color: transparent; }
+  input[readonly] { background: #f0f2f5; color: #666; }
+
+  /* ── Status indicator ── */
+  #ollama-status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 12px; color: #555; margin-top: 8px;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #ccc; flex-shrink: 0; }
+  .dot.green  { background: #2e7d32; }
+  .dot.red    { background: #c62828; }
+  .dot.yellow { background: #f57f17; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    margin-top: 8px;
+    border: none;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity .15s, background .15s;
+  }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn-primary  { background: #2e7d32; color: #fff; }
+  .btn-primary:hover:not(:disabled)  { background: #1b5e20; }
+  .btn-danger   { background: #c62828; color: #fff; }
+  .btn-danger:hover:not(:disabled)   { background: #7f0000; }
+  .btn-download { background: #1565c0; color: #fff; }
+  .btn-download:hover:not(:disabled) { background: #0d47a1; }
+  .btn-upload {
+    background: #fff; color: #1e3a5f;
+    border: 2px dashed #3a7bd5;
+    border-radius: 6px;
+    padding: 12px;
+    text-align: center;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: background .15s;
+  }
+  .btn-upload:hover { background: #e8f0fe; }
+
+  /* ── Progress ── */
+  #progress-wrap { padding: 10px 14px; border-bottom: 1px solid #eef0f3; display: none; }
+  #progress-bar-outer {
+    height: 8px; background: #e0e0e0; border-radius: 4px; overflow: hidden;
+  }
+  #progress-bar-inner {
+    height: 100%; background: #2e7d32; border-radius: 4px;
+    width: 0%; transition: width .3s;
+  }
+  #progress-label { font-size: 11px; color: #666; margin-top: 4px; }
+
+  /* ── Main content ── */
+  main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #fff;
+  }
+
+  /* ── Drop zone ── */
+  #drop-zone {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    color: #888;
+    border: none;
+  }
+  #drop-zone.drag-over { background: #e8f0fe; }
+  #drop-zone svg { width: 64px; height: 64px; opacity: .3; }
+  #drop-zone p { font-size: 15px; }
+  #drop-zone small { color: #aaa; }
+
+  /* ── Table ── */
+  #table-wrap { flex: 1; overflow: auto; display: none; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+  }
+  thead th {
+    position: sticky; top: 0;
+    background: #f5f7fa;
+    border-bottom: 2px solid #dde1e7;
+    padding: 8px 10px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 700;
+    color: #555;
+    z-index: 1;
+  }
+  th:nth-child(1) { width: 18%; }
+  th:nth-child(2) { width: 33%; }
+  th:nth-child(3) { width: 33%; }
+  th:nth-child(4) { width: 16%; }
+
+  tbody tr { border-bottom: 1px solid #f0f2f5; }
+  tbody tr:hover { background: #f9fafb; }
+  td {
+    padding: 6px 10px;
+    font-size: 13px;
+    vertical-align: top;
+    word-break: break-word;
+  }
+  td.id-cell   { color: #666; font-size: 11px; }
+  td.note-cell { color: #888; font-size: 11px; }
+
+  /* Row states */
+  tr.row-empty       { background: #fff3e0; }
+  tr.row-translated  { background: #f1f8e9; }
+  tr.row-active      { background: #fffde7; }
+  tr.row-alttext td.id-cell { color: #1565c0; }
+
+  /* Target cell editing */
+  td.target-cell {
+    cursor: text;
+    outline: none;
+    white-space: pre-wrap;
+  }
+  td.target-cell:focus {
+    background: #fff9c4;
+    box-shadow: inset 0 0 0 2px #f9a825;
+    border-radius: 2px;
+  }
+
+  /* ── Stats bar ── */
+  #stats-bar {
+    padding: 6px 14px;
+    background: #f5f7fa;
+    border-top: 1px solid #dde1e7;
+    font-size: 12px;
+    color: #666;
+    display: none;
+    flex-shrink: 0;
+  }
+
+  .btn-compare  { background: #6a1b9a; color: #fff; }
+  .btn-compare:hover:not(:disabled)  { background: #4a148c; }
+  .btn-zip      { background: #00695c; color: #fff; }
+  .btn-zip:hover:not(:disabled)      { background: #004d40; }
+
+  /* ── Project info panel ── */
+  #project-panel {
+    display: none;
+    background: #e8f5e9;
+    border-bottom: 1px solid #a5d6a7;
+    padding: 8px 14px;
+    font-size: 12px;
+    flex-shrink: 0;
+  }
+  #project-panel.open { display: block; }
+  .proj-title { font-weight: 700; color: #1b5e20; font-size: 13px; margin-bottom: 6px; }
+  .proj-grid  { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; }
+  .proj-label { color: #555; }
+  .proj-value { color: #1b5e20; font-weight: 600; }
+  .proj-files { margin-top: 6px; }
+  .proj-files summary { cursor: pointer; color: #2e7d32; font-weight: 600; }
+  .proj-files ul { margin: 4px 0 0 16px; padding: 0; }
+  .proj-files li { color: #555; margin: 2px 0; }
+
+  /* ── Diff modal ── */
+  #diff-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,.55);
+    z-index: 500;
+    align-items: center;
+    justify-content: center;
+  }
+  #diff-overlay.open { display: flex; }
+  #diff-modal {
+    background: #fff;
+    border-radius: 8px;
+    width: 92vw; height: 88vh;
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    box-shadow: 0 8px 40px rgba(0,0,0,.35);
+  }
+  #diff-modal header {
+    background: #1e3a5f;
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 10px;
+    flex-shrink: 0;
+  }
+  #diff-modal header span { flex: 1; font-size: 15px; font-weight: 600; }
+  #diff-modal header button {
+    background: transparent; border: 1px solid rgba(255,255,255,.4);
+    color: #fff; border-radius: 4px; padding: 4px 12px; cursor: pointer; font-size: 13px;
+  }
+  #diff-modal header button:hover { background: rgba(255,255,255,.15); }
+  .diff-cols {
+    display: flex; flex: 1; overflow: hidden; gap: 0;
+  }
+  .diff-col {
+    flex: 1; display: flex; flex-direction: column; overflow: hidden;
+    border-right: 1px solid #dde1e7;
+  }
+  .diff-col:last-child { border-right: none; }
+  .diff-col-header {
+    padding: 6px 12px;
+    background: #f5f7fa;
+    border-bottom: 1px solid #dde1e7;
+    font-size: 12px; font-weight: 700; color: #555;
+    flex-shrink: 0;
+  }
+  .diff-col pre {
+    flex: 1; overflow: auto; margin: 0;
+    padding: 8px 12px;
+    font-family: 'Courier New', monospace; font-size: 12px;
+    line-height: 1.55; white-space: pre; background: #fff;
+  }
+  .diff-line-del { background: #ffcccc; display: block; }
+  .diff-line-ins { background: #ccffcc; display: block; }
+  .diff-legend {
+    padding: 6px 14px; background: #f5f7fa; border-top: 1px solid #dde1e7;
+    font-size: 12px; color: #555; flex-shrink: 0; display: flex; gap: 16px;
+  }
+  .diff-legend span { display: flex; align-items: center; gap: 5px; }
+  .diff-swatch { display: inline-block; width: 14px; height: 14px; border-radius: 2px; }
+
+  /* ── File input hidden ── */
+  #file-input { display: none; }
+
+  /* ── Notification toast ── */
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: #323232; color: #fff;
+    padding: 10px 20px; border-radius: 6px;
+    font-size: 13px; pointer-events: none;
+    opacity: 0; transition: opacity .3s;
+    z-index: 1000;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>XLF Translator</h1>
+  <span id="badge-version"></span>
+  <span id="lbl-original"></span>
+  <span id="lbl-session" style="color:#a8c4e8;font-size:11px;font-family:monospace;display:none">Session: <span id="lbl-session-id"></span></span>
+</header>
+
+<div class="layout">
+
+  <!-- ── Sidebar ── -->
+  <aside>
+
+    <!-- File -->
+    <div class="section">
+      <div class="section-title">File</div>
+      <input type="file" id="file-input" accept=".xlf,.xliff">
+      <input type="file" id="project-input" accept=".zip">
+      <div class="btn-upload" id="btn-upload-area">
+        &#8593; Click or drag XLF file here
+      </div>
+      <div class="btn-upload" id="btn-project-area" style="margin-top:6px;border-color:#2e7d32;color:#2e7d32">
+        📁 Click to open Project ZIP
+      </div>
+    </div>
+
+    <!-- Ollama -->
+    <div class="section">
+      <div class="section-title">Ollama</div>
+      <label>Server URL</label>
+      <input type="text" id="ollama-url" value="http://127.0.0.1:11434">
+      <div id="ollama-status"><span class="dot" id="ollama-dot"></span><span id="ollama-status-text">Not checked</span></div>
+      <label>Model</label>
+      <select id="model-select">
+        <option value="">— refresh to load —</option>
+      </select>
+      <button class="btn btn-primary" id="btn-refresh-models" style="margin-top:8px">↻ Refresh models</button>
+    </div>
+
+    <!-- Translation -->
+    <div class="section">
+      <div class="section-title">Translation</div>
+      <label>Source language</label>
+      <input type="text" id="src-lang" readonly placeholder="auto-detected">
+      <label>Target language</label>
+      <select id="tgt-lang">
+        <option value="it-IT">Italian (it-IT)</option>
+        <option value="fr-FR">French (fr-FR)</option>
+        <option value="de-DE">German (de-DE)</option>
+        <option value="es-ES">Spanish (es-ES)</option>
+        <option value="pt-PT">Portuguese (pt-PT)</option>
+        <option value="nl-NL">Dutch (nl-NL)</option>
+        <option value="pl-PL">Polish (pl-PL)</option>
+        <option value="ru-RU">Russian (ru-RU)</option>
+        <option value="zh-CN">Chinese Simplified (zh-CN)</option>
+        <option value="zh-TW">Chinese Traditional (zh-TW)</option>
+        <option value="ja-JP">Japanese (ja-JP)</option>
+        <option value="ko-KR">Korean (ko-KR)</option>
+        <option value="ar-SA">Arabic (ar-SA)</option>
+        <option value="tr-TR">Turkish (tr-TR)</option>
+        <option value="sv-SE">Swedish (sv-SE)</option>
+        <option value="da-DK">Danish (da-DK)</option>
+        <option value="fi-FI">Finnish (fi-FI)</option>
+        <option value="nb-NO">Norwegian (nb-NO)</option>
+        <option value="cs-CZ">Czech (cs-CZ)</option>
+        <option value="hu-HU">Hungarian (hu-HU)</option>
+        <option value="ro-RO">Romanian (ro-RO)</option>
+        <option value="uk-UA">Ukrainian (uk-UA)</option>
+        <option value="el-GR">Greek (el-GR)</option>
+        <option value="he-IL">Hebrew (he-IL)</option>
+        <option value="vi-VN">Vietnamese (vi-VN)</option>
+        <option value="th-TH">Thai (th-TH)</option>
+        <option value="id-ID">Indonesian (id-ID)</option>
+        <option value="en-US">English (en-US)</option>
+      </select>
+      <label>Segment filter</label>
+      <select id="seg-filter">
+        <option value="all">All segments</option>
+        <option value="skip_alt" selected>Skip AltText</option>
+        <option value="only_alt">AltText only</option>
+      </select>
+      <label>
+        <input type="checkbox" id="chk-empty-only" checked style="margin-right:4px">
+        Only empty segments
+      </label>
+      <label>Output mode</label>
+      <select id="output-mode">
+        <option value="replace">Source replaced (Articulate)</option>
+        <option value="target">Target added (standard XLIFF)</option>
+      </select>
+    </div>
+
+    <!-- Progress -->
+    <div id="progress-wrap">
+      <div class="section-title" style="padding:0 0 6px">Progress</div>
+      <div id="progress-bar-outer"><div id="progress-bar-inner"></div></div>
+      <div id="progress-label">—</div>
+    </div>
+
+    <!-- Actions -->
+    <div class="section">
+      <button class="btn btn-primary"  id="btn-translate" disabled>▶ Translate</button>
+      <button class="btn btn-danger"   id="btn-cancel"    disabled>■ Cancel</button>
+      <button class="btn btn-download" id="btn-download"  disabled>⬇ Download translated XLF</button>
+      <button class="btn btn-zip"      id="btn-zip"       disabled style="display:none">⬇ Download Project ZIP</button>
+      <button class="btn btn-compare"  id="btn-compare"   disabled>⇄ Compare source / translated</button>
+    </div>
+
+  </aside>
+
+  <!-- ── Main area ── -->
+  <main>
+
+    <!-- Project info panel -->
+    <div id="project-panel">
+      <div class="proj-title" id="proj-title"></div>
+      <div class="proj-grid">
+        <span class="proj-label">Session</span><span class="proj-value" id="proj-session" style="font-size:10px;font-family:monospace"></span>
+        <span class="proj-label">Total size</span><span class="proj-value" id="proj-size"></span>
+        <span class="proj-label">Glossary</span><span class="proj-value" id="proj-glossary"></span>
+        <span class="proj-label">Segments</span><span class="proj-value" id="proj-segments"></span>
+      </div>
+      <details class="proj-files" id="proj-files-detail">
+        <summary>Files</summary>
+        <ul id="proj-files-list"></ul>
+      </details>
+    </div>
+
+    <div id="drop-zone">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+        <line x1="12" y1="18" x2="12" y2="12"/>
+        <polyline points="9 15 12 12 15 15"/>
+      </svg>
+      <p>Drop an XLF file here or use the sidebar</p>
+      <small>XLIFF 1.2 and 2.0 supported</small>
+    </div>
+
+    <div id="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Source</th>
+            <th>Target</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <div id="stats-bar"></div>
+
+  </main>
+</div>
+
+<!-- ── Diff modal ── -->
+<div id="diff-overlay">
+  <div id="diff-modal">
+    <header>
+      <span>Source vs Translated — XLF diff</span>
+      <button id="btn-diff-close">✕ Close</button>
+    </header>
+    <div class="diff-cols">
+      <div class="diff-col">
+        <div class="diff-col-header">Source (original)</div>
+        <pre id="diff-left"></pre>
+      </div>
+      <div class="diff-col">
+        <div class="diff-col-header">Translated</div>
+        <pre id="diff-right"></pre>
+      </div>
+    </div>
+    <div class="diff-legend">
+      <span><span class="diff-swatch" style="background:#ffcccc"></span>Source-only line</span>
+      <span><span class="diff-swatch" style="background:#ccffcc"></span>Translated-only line</span>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────────────────────
+let jobId = null;
+let segments = [];   // [{unit_id, source, target, note, unit_type, pc_id, is_alt_text}]
+let evtSource = null;
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function toast(msg, dur = 3000) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), dur);
+}
+
+function segKey(unit_id, pc_id) { return unit_id + '\x00' + (pc_id || ''); }
+
+function rowId(unit_id, pc_id) {
+  return 'row-' + btoa(encodeURIComponent(segKey(unit_id, pc_id))).replace(/=/g,'');
+}
+
+// ── File upload ────────────────────────────────────────────────────────────
+const fileInput  = document.getElementById('file-input');
+const uploadArea = document.getElementById('btn-upload-area');
+const dropZone   = document.getElementById('drop-zone');
+
+uploadArea.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+  if (fileInput.files[0]) handleFile(fileInput.files[0]);
+});
+
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropZone.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f) handleFile(f);
+});
+
+async function handleFile(file) {
+  // Delete previous session
+  if (jobId) {
+    fetch('/session/' + jobId, {method: 'DELETE'}).catch(() => {});
+    jobId = null; segments = [];
+  }
+
+  const fd = new FormData();
+  fd.append('file', file);
+  uploadArea.textContent = '⏳ Loading…';
+  try {
+    const r = await fetch('/upload', {method: 'POST', body: fd});
+    if (!r.ok) {
+      const e = await r.json();
+      throw new Error(e.detail || r.statusText);
+    }
+    const data = await r.json();
+    jobId = data.job_id;
+    segments = data.segments;
+
+    document.getElementById('src-lang').value = data.source_lang || '';
+    document.getElementById('badge-version').textContent = 'XLIFF ' + data.version;
+    document.getElementById('badge-version').style.display = 'inline-block';
+    document.getElementById('lbl-original').textContent = data.original || '';
+    document.getElementById('lbl-session-id').textContent = data.job_id;
+    document.getElementById('lbl-session').style.display = '';
+
+    renderTable();
+    updateStats();
+
+    isProject = false;
+    document.getElementById('project-panel').classList.remove('open');
+    document.getElementById('btn-zip').style.display  = 'none';
+    document.getElementById('btn-translate').disabled = false;
+    document.getElementById('btn-download').disabled  = false;
+    document.getElementById('btn-compare').disabled   = false;
+    document.getElementById('btn-compare').disabled   = false;
+    uploadArea.textContent = '✓ ' + file.name + ' — click to replace';
+    toast('File loaded: ' + segments.length + ' segments');
+  } catch (err) {
+    uploadArea.textContent = '↑ Click or drag XLF file here';
+    toast('Error: ' + err.message, 5000);
+  }
+}
+
+// ── Table rendering ────────────────────────────────────────────────────────
+function renderTable() {
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = '';
+  for (const seg of segments) {
+    const tr = document.createElement('tr');
+    tr.id = rowId(seg.unit_id, seg.pc_id);
+    setRowClass(tr, seg);
+
+    // ID cell
+    const tdId = document.createElement('td');
+    tdId.className = 'id-cell';
+    tdId.textContent = seg.unit_id + (seg.pc_id ? ' #' + seg.pc_id : '');
+    if (seg.is_alt_text) tdId.title = 'AltText — skipped by default filter';
+    else if (seg.unit_type) tdId.title = seg.unit_type;
+
+    // Source
+    const tdSrc = document.createElement('td');
+    tdSrc.textContent = seg.source;
+
+    // Target (editable)
+    const tdTgt = document.createElement('td');
+    tdTgt.className = 'target-cell';
+    tdTgt.contentEditable = 'true';
+    tdTgt.textContent = seg.target || '';
+    tdTgt.dataset.unitId = seg.unit_id;
+    tdTgt.dataset.pcId   = seg.pc_id || '';
+    tdTgt.addEventListener('blur', onTargetBlur);
+
+    // Note
+    const tdNote = document.createElement('td');
+    tdNote.className = 'note-cell';
+    tdNote.textContent = seg.note || '';
+
+    tr.append(tdId, tdSrc, tdTgt, tdNote);
+    tbody.appendChild(tr);
+  }
+
+  document.getElementById('drop-zone').style.display  = 'none';
+  document.getElementById('table-wrap').style.display = 'block';
+  document.getElementById('stats-bar').style.display  = 'block';
+}
+
+function setRowClass(tr, seg) {
+  tr.className = seg.target ? 'row-translated' : 'row-empty';
+  if (seg.is_alt_text) tr.classList.add('row-alttext');
+}
+
+function updateStats() {
+  const total = segments.length;
+  const done  = segments.filter(s => s.target).length;
+  const altText = segments.filter(s => s.is_alt_text).length;
+  document.getElementById('stats-bar').textContent =
+    `${done} / ${total} translated` +
+    (altText ? `  ·  ${altText} AltText` : '');
+}
+
+// ── Inline editing ─────────────────────────────────────────────────────────
+async function onTargetBlur(e) {
+  if (!jobId) return;
+  const cell    = e.target;
+  const unit_id = cell.dataset.unitId;
+  const pc_id   = cell.dataset.pcId;
+  const text    = cell.textContent.trim();
+
+  const seg = segments.find(s => s.unit_id === unit_id && (s.pc_id||'') === pc_id);
+  if (!seg || seg.target === text) return;
+
+  seg.target = text;
+  const tr = document.getElementById(rowId(unit_id, pc_id));
+  if (tr) setRowClass(tr, seg);
+  updateStats();
+
+  try {
+    await fetch('/update/' + jobId, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({unit_id, pc_id, target: text}),
+    });
+  } catch (err) {
+    toast('Save error: ' + err.message, 4000);
+  }
+}
+
+// ── Model refresh ──────────────────────────────────────────────────────────
+document.getElementById('btn-refresh-models').addEventListener('click', refreshModels);
+
+async function refreshModels() {
+  const url   = document.getElementById('ollama-url').value.trim();
+  const dot   = document.getElementById('ollama-dot');
+  const label = document.getElementById('ollama-status-text');
+  const sel   = document.getElementById('model-select');
+  dot.className = 'dot yellow';
+  label.textContent = 'Connecting…';
+  try {
+    const r = await fetch('/models?url=' + encodeURIComponent(url));
+    const data = await r.json();
+    const models = data.models || [];
+    sel.innerHTML = models.length
+      ? models.map(m => `<option value="${m}">${m}</option>`).join('')
+      : '<option value="">No models found</option>';
+    dot.className = models.length ? 'dot green' : 'dot red';
+    label.textContent = models.length ? `Connected · ${models.length} model(s)` : 'Connected but no models';
+  } catch {
+    dot.className = 'dot red';
+    label.textContent = 'Server offline';
+    sel.innerHTML = '<option value="">— offline —</option>';
+  }
+}
+
+// Refresh on load
+refreshModels();
+
+// ── Translate ──────────────────────────────────────────────────────────────
+document.getElementById('btn-translate').addEventListener('click', startTranslation);
+document.getElementById('btn-cancel').addEventListener('click', cancelTranslation);
+
+async function startTranslation() {
+  if (!jobId) return;
+
+  document.getElementById('btn-translate').disabled = true;
+  document.getElementById('btn-cancel').disabled    = false;
+  document.getElementById('progress-wrap').style.display = 'block';
+  setProgress(0, 0, '');
+
+  const body = {
+    ollama_url:  document.getElementById('ollama-url').value.trim(),
+    model:       document.getElementById('model-select').value,
+    target_lang: document.getElementById('tgt-lang').value,
+    seg_filter:  document.getElementById('seg-filter').value,
+    empty_only:  document.getElementById('chk-empty-only').checked,
+    output_mode: document.getElementById('output-mode').value,
+  };
+
+  try {
+    const r = await fetch('/translate/' + jobId, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const e = await r.json();
+      throw new Error(e.detail || r.statusText);
+    }
+  } catch (err) {
+    toast('Could not start: ' + err.message, 5000);
+    resetTranslateUI();
+    return;
+  }
+
+  // Open SSE stream
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/progress/' + jobId);
+  evtSource.onmessage = handleProgressEvent;
+  evtSource.onerror   = () => {
+    toast('Connection to server lost', 4000);
+    resetTranslateUI();
+  };
+}
+
+function handleProgressEvent(e) {
+  const data = JSON.parse(e.data);
+
+  if (data.heartbeat) return;
+
+  if (data.current !== undefined) {
+    setProgress(data.current, data.total, data.unit_id);
+
+    // Apply translated text immediately
+    if (data.translations) {
+      for (const upd of data.translations) {
+        const seg = segments.find(s => s.unit_id === upd.unit_id && (s.pc_id||'') === (upd.pc_id||''));
+        if (!seg) continue;
+        seg.target = upd.target;
+        const tr = document.getElementById(rowId(upd.unit_id, upd.pc_id));
+        if (tr) {
+          setRowClass(tr, seg);
+          const cell = tr.querySelector('.target-cell');
+          if (cell && document.activeElement !== cell) cell.textContent = upd.target;
+        }
+      }
+      updateStats();
+    }
+
+    // Highlight next active row
+    document.querySelectorAll('tr.row-active').forEach(r => {
+      r.classList.remove('row-active');
+      const uid = r.querySelector('td.target-cell')?.dataset.unitId;
+      const seg = segments.find(s => s.unit_id === uid);
+      if (seg) setRowClass(r, seg);
+    });
+    const firstSeg = segments.find(s => s.unit_id === data.unit_id && !s.target);
+    if (firstSeg) {
+      const tr = document.getElementById(rowId(firstSeg.unit_id, firstSeg.pc_id));
+      if (tr) { tr.className = 'row-active'; tr.scrollIntoView({block:'nearest'}); }
+    }
+  }
+
+  if (data.done) {
+    toast('Translation complete!');
+    resetTranslateUI();
+    evtSource.close(); evtSource = null;
+  }
+
+  if (data.error) {
+    toast('Error: ' + data.error, 6000);
+    resetTranslateUI();
+    evtSource.close(); evtSource = null;
+  }
+}
+
+async function cancelTranslation() {
+  if (!jobId) return;
+  await fetch('/cancel/' + jobId, {method: 'POST'}).catch(() => {});
+  toast('Cancellation requested');
+}
+
+function setProgress(current, total, unit_id) {
+  const pct = total > 0 ? Math.round(current / total * 100) : 0;
+  document.getElementById('progress-bar-inner').style.width = pct + '%';
+  document.getElementById('progress-label').textContent =
+    total > 0 ? `${current} / ${total}  ${unit_id || ''}` : '—';
+}
+
+function resetTranslateUI() {
+  document.getElementById('btn-translate').disabled = false;
+  document.getElementById('btn-cancel').disabled    = true;
+}
+
+// ── Download XLF ───────────────────────────────────────────────────────────
+document.getElementById('btn-download').addEventListener('click', () => {
+  if (!jobId) return;
+  const mode = document.getElementById('output-mode').value;
+  const lang = document.getElementById('tgt-lang').value;
+  window.location = `/download/${jobId}?mode=${mode}&target_lang=${encodeURIComponent(lang)}`;
+});
+
+// ── Project upload ─────────────────────────────────────────────────────────
+let isProject = false;
+
+const projectInput = document.getElementById('project-input');
+const projectArea  = document.getElementById('btn-project-area');
+
+projectArea.addEventListener('click', () => projectInput.click());
+projectInput.addEventListener('change', () => {
+  if (projectInput.files[0]) handleProject(projectInput.files[0]);
+});
+
+async function handleProject(file) {
+  if (jobId) { fetch('/session/' + jobId, {method:'DELETE'}).catch(()=>{}); jobId = null; segments = []; }
+  projectArea.textContent = '⏳ Loading project…';
+  const fd = new FormData();
+  fd.append('file', file);
+  try {
+    const r = await fetch('/project/upload', {method:'POST', body: fd});
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const data = await r.json();
+    jobId    = data.job_id;
+    segments = data.segments;
+    isProject = true;
+
+    document.getElementById('src-lang').value = data.source_lang || '';
+    document.getElementById('badge-version').textContent = 'XLIFF ' + data.version;
+    document.getElementById('badge-version').style.display = 'inline-block';
+    document.getElementById('lbl-original').textContent = data.original || '';
+    document.getElementById('lbl-session-id').textContent = data.job_id;
+    document.getElementById('lbl-session').style.display = '';
+
+    renderTable();
+    updateStats();
+    showProjectPanel(data);
+
+    document.getElementById('btn-translate').disabled = false;
+    document.getElementById('btn-download').disabled  = false;
+    document.getElementById('btn-compare').disabled   = false;
+    document.getElementById('btn-zip').style.display  = '';
+    document.getElementById('btn-zip').disabled       = false;
+    projectArea.textContent = '✓ ' + file.name + ' — click to replace';
+    document.getElementById('btn-upload-area').textContent = '↑ Click or drag XLF file here';
+    toast('Project loaded: ' + (data.project_name || file.name));
+  } catch(err) {
+    projectArea.textContent = '📁 Click to open Project ZIP';
+    toast('Error: ' + err.message, 5000);
+  }
+}
+
+function showProjectPanel(data) {
+  const proj   = data.project || {};
+  const meta   = proj.metadata || {};
+  const total  = segments.length;
+  const done   = segments.filter(s => s.target).length;
+  const g      = proj.glossary || {};
+
+  document.getElementById('proj-title').textContent    = '📁 ' + (data.project_name || '');
+  document.getElementById('proj-session').textContent  = data.job_id;
+  document.getElementById('proj-size').textContent     = proj.total_size || '—';
+  document.getElementById('proj-glossary').textContent = g.exists
+    ? `${g.terms} terms (${g.size})` : 'not present';
+  document.getElementById('proj-segments').textContent = `${done} / ${total} translated`;
+
+  // File listing
+  const ul = document.getElementById('proj-files-list');
+  ul.innerHTML = '';
+  const addFiles = (label, files) => {
+    if (!files || !files.length) return;
+    const li = document.createElement('li');
+    li.style.fontWeight = '600';
+    li.style.marginTop  = '4px';
+    li.textContent = label + '/';
+    ul.appendChild(li);
+    for (const f of files) {
+      const fi = document.createElement('li');
+      fi.style.marginLeft = '12px';
+      fi.textContent = `${f.name}  (${f.size})`;
+      ul.appendChild(fi);
+    }
+  };
+  addFiles('input',  proj.input);
+  addFiles('output', proj.output);
+
+  document.getElementById('project-panel').classList.add('open');
+}
+
+async function refreshProjectPanel() {
+  if (!jobId || !isProject) return;
+  try {
+    const r = await fetch(`/project/${jobId}/info`);
+    if (!r.ok) return;
+    const proj = await r.json();
+    const total = segments.length;
+    const done  = segments.filter(s => s.target).length;
+    document.getElementById('proj-size').textContent     = proj.total_size || '—';
+    document.getElementById('proj-segments').textContent = `${done} / ${total} translated`;
+    // Refresh output listing
+    const ul = document.getElementById('proj-files-list');
+    ul.innerHTML = '';
+    const addFiles = (label, files) => {
+      if (!files || !files.length) return;
+      const li = document.createElement('li');
+      li.style.fontWeight = '600'; li.style.marginTop = '4px';
+      li.textContent = label + '/'; ul.appendChild(li);
+      for (const f of files) {
+        const fi = document.createElement('li');
+        fi.style.marginLeft = '12px';
+        fi.textContent = `${f.name}  (${f.size})`; ul.appendChild(fi);
+      }
+    };
+    addFiles('input',  proj.input);
+    addFiles('output', proj.output);
+  } catch {}
+}
+
+// Refresh project panel after download
+document.getElementById('btn-download').addEventListener('click', () => {
+  setTimeout(refreshProjectPanel, 1500);
+}, {capture: false});
+
+// ── Download Project ZIP ───────────────────────────────────────────────────
+document.getElementById('btn-zip').addEventListener('click', async () => {
+  if (!jobId || !isProject) return;
+  // Trigger translated XLF save first so it's included in the zip
+  const mode = document.getElementById('output-mode').value;
+  const lang = document.getElementById('tgt-lang').value;
+  try {
+    await fetch(`/download/${jobId}?mode=${mode}&target_lang=${encodeURIComponent(lang)}`);
+  } catch {}
+  window.location = `/project/${jobId}/zip`;
+  setTimeout(refreshProjectPanel, 2000);
+});
+
+// ── Compare / Diff ─────────────────────────────────────────────────────────
+document.getElementById('btn-compare').addEventListener('click', openDiff);
+document.getElementById('btn-diff-close').addEventListener('click', () => {
+  document.getElementById('diff-overlay').classList.remove('open');
+});
+// Close on backdrop click
+document.getElementById('diff-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('diff-overlay'))
+    document.getElementById('diff-overlay').classList.remove('open');
+});
+
+async function openDiff() {
+  if (!jobId) return;
+  const mode = document.getElementById('output-mode').value;
+  const leftPre  = document.getElementById('diff-left');
+  const rightPre = document.getElementById('diff-right');
+  leftPre.textContent = 'Loading…';
+  rightPre.textContent = '';
+  document.getElementById('diff-overlay').classList.add('open');
+
+  try {
+    const r = await fetch(`/diff/${jobId}?mode=${mode}`);
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const data = await r.json();
+    renderDiff(data.source, data.translated);
+  } catch (err) {
+    leftPre.textContent = 'Error: ' + err.message;
+  }
+}
+
+function renderDiff(srcText, tgtText) {
+  const srcLines = srcText.split('\n');
+  const tgtLines = tgtText.split('\n');
+  const ops = diffOpcodes(srcLines, tgtLines);
+
+  const leftPre  = document.getElementById('diff-left');
+  const rightPre = document.getElementById('diff-right');
+  leftPre.innerHTML  = '';
+  rightPre.innerHTML = '';
+
+  // Sync scroll
+  leftPre.onscroll  = () => { rightPre.scrollTop = leftPre.scrollTop; rightPre.scrollLeft = leftPre.scrollLeft; };
+  rightPre.onscroll = () => { leftPre.scrollTop = rightPre.scrollTop; leftPre.scrollLeft = rightPre.scrollLeft; };
+
+  for (const [tag, i1, i2, j1, j2] of ops) {
+    if (tag === 'equal') {
+      for (let i = i1; i < i2; i++) appendLine(leftPre,  srcLines[i], '');
+      for (let j = j1; j < j2; j++) appendLine(rightPre, tgtLines[j], '');
+    } else if (tag === 'replace') {
+      for (let i = i1; i < i2; i++) appendLine(leftPre,  srcLines[i], 'diff-line-del');
+      for (let j = j1; j < j2; j++) appendLine(rightPre, tgtLines[j], 'diff-line-ins');
+      // Pad shorter side with blank lines to keep alignment
+      for (let k = i2 - i1; k < j2 - j1; k++) appendLine(leftPre,  '', '');
+      for (let k = j2 - j1; k < i2 - i1; k++) appendLine(rightPre, '', '');
+    } else if (tag === 'delete') {
+      for (let i = i1; i < i2; i++) {
+        appendLine(leftPre,  srcLines[i], 'diff-line-del');
+        appendLine(rightPre, '', '');
+      }
+    } else if (tag === 'insert') {
+      for (let j = j1; j < j2; j++) {
+        appendLine(leftPre,  '', '');
+        appendLine(rightPre, tgtLines[j], 'diff-line-ins');
+      }
+    }
+  }
+}
+
+function appendLine(pre, text, cls) {
+  const span = document.createElement('span');
+  span.className = cls;
+  // Use a zero-width space so empty lines keep their height
+  span.textContent = text === '' ? '\u200b' : text + '\n';
+  pre.appendChild(span);
+}
+
+// ── LCS-based diff (Wagner-Fischer traceback) ──────────────────────────────
+function diffOpcodes(a, b) {
+  const n = a.length, m = b.length;
+
+  // Build DP table
+  const dp = Array.from({length: n + 1}, () => new Int32Array(m + 1));
+  for (let i = 1; i <= n; i++)
+    for (let j = 1; j <= m; j++)
+      dp[i][j] = a[i-1] === b[j-1]
+        ? dp[i-1][j-1] + 1
+        : Math.max(dp[i-1][j], dp[i][j-1]);
+
+  // Traceback — collect raw edit atoms in reverse, then reverse
+  const raw = [];
+  let i = n, j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i-1] === b[j-1]) {
+      raw.push(['eq', i-1, j-1]); i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
+      raw.push(['ins', j-1]); j--;
+    } else {
+      raw.push(['del', i-1]); i--;
+    }
+  }
+  raw.reverse();
+
+  // Group consecutive same-type atoms into span tuples
+  const spans = [];
+  let k = 0;
+  while (k < raw.length) {
+    const type = raw[k][0];
+    const s = k;
+    while (k < raw.length && raw[k][0] === type) k++;
+    if (type === 'eq') {
+      spans.push(['equal',  raw[s][1], raw[k-1][1]+1, raw[s][2], raw[k-1][2]+1]);
+    } else if (type === 'del') {
+      spans.push(['delete', raw[s][1], raw[k-1][1]+1, 0, 0]);
+    } else {
+      spans.push(['insert', 0, 0, raw[s][1], raw[k-1][1]+1]);
+    }
+  }
+
+  // Merge adjacent delete+insert → replace
+  const ops = [];
+  let mi = 0;
+  while (mi < spans.length) {
+    if (mi + 1 < spans.length && spans[mi][0] === 'delete' && spans[mi+1][0] === 'insert') {
+      ops.push(['replace', spans[mi][1], spans[mi][2], spans[mi+1][3], spans[mi+1][4]]);
+      mi += 2;
+    } else {
+      ops.push(spans[mi]);
+      mi++;
+    }
+  }
+  return ops;
+}
+</script>
+</body>
+</html>

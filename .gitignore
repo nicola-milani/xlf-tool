@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# Virtual environments
+.venv/
+.winvenv/
+venv/
+env/
+
+# Distribution / build
+dist/
+build/
+*.spec
+
+# Logs and temp files
+*.log
+*.bak
+*.tmp
+*.swp
+
+# Session data (web server runtime)
+xlf-sessions/
+
+# Test / sample XLF files (add individual ones if needed)
+inputFile/
+
+# IDE
+.idea/
+.vscode/
+
+# macOS
+.DS_Store
+__MACOSX/
+
+# Windows
+Thumbs.db
