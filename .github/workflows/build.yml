@@ -1,0 +1,146 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x86_64
+            exe: xlf-translate
+            add_data_sep: ":"
+            extra_flags: ""
+
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+            exe: xlf-translate
+            add_data_sep: ":"
+            extra_flags: ""
+
+          - os: macos-13
+            name: macos-x86_64
+            exe: xlf-translate
+            add_data_sep: ":"
+            extra_flags: "--windowed"
+
+          - os: macos-latest
+            name: macos-arm64
+            exe: xlf-translate
+            add_data_sep: ":"
+            extra_flags: "--windowed"
+
+          - os: windows-latest
+            name: windows-x86_64
+            exe: xlf-translate.exe
+            add_data_sep: ";"
+            extra_flags: "--noconsole"
+
+          - os: windows-11-arm
+            name: windows-arm64
+            exe: xlf-translate.exe
+            add_data_sep: ";"
+            extra_flags: "--noconsole"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libgl1 \
+            libglib2.0-0 \
+            libdbus-1-3 \
+            libxkbcommon-x11-0 \
+            libfontconfig1
+
+      - name: Install Python dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build executable (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          pyinstaller --onefile ${{ matrix.extra_flags }} \
+            --name xlf-translate \
+            --add-data "static${{ matrix.add_data_sep }}static" \
+            --hidden-import uvicorn.logging \
+            --hidden-import uvicorn.loops \
+            --hidden-import uvicorn.loops.auto \
+            --hidden-import uvicorn.protocols \
+            --hidden-import uvicorn.protocols.http \
+            --hidden-import uvicorn.protocols.http.auto \
+            --hidden-import uvicorn.lifespan \
+            --hidden-import uvicorn.lifespan.on \
+            main.py
+
+      - name: Build executable (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --onefile ${{ matrix.extra_flags }} `
+            --name xlf-translate `
+            --add-data "static${{ matrix.add_data_sep }}static" `
+            --hidden-import uvicorn.logging `
+            --hidden-import uvicorn.loops `
+            --hidden-import uvicorn.loops.auto `
+            --hidden-import uvicorn.protocols `
+            --hidden-import uvicorn.protocols.http `
+            --hidden-import uvicorn.protocols.http.auto `
+            --hidden-import uvicorn.lifespan `
+            --hidden-import uvicorn.lifespan.on `
+            main.py
+
+      - name: Rename artifact
+        shell: bash
+        run: |
+          src="dist/${{ matrix.exe }}"
+          ext="${{ matrix.exe == 'xlf-translate.exe' && '.exe' || '' }}"
+          mv "$src" "dist/xlf-translate-${{ matrix.name }}${ext}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: xlf-translate-${{ matrix.name }}
+          path: dist/xlf-translate-${{ matrix.name }}*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh artifacts/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
