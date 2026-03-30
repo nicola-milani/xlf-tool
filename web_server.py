@@ -48,6 +48,7 @@ from pydantic import BaseModel
 from llm_client import OllamaClient
 from project_manager import Project, glossary_exact, glossary_substitute
 from xlf_parser import OutputMode, XlfParser
+from config import MULTI_LANG_ENABLED
 
 # ── Directories ───────────────────────────────────────────────────────────────
 
@@ -248,14 +249,19 @@ async def list_models(url: str = "http://127.0.0.1:11434"):
     return {"models": models}
 
 
+@app.get("/features")
+async def get_features():
+    return {"multi_lang": MULTI_LANG_ENABLED}
+
+
 # ── Translation ───────────────────────────────────────────────────────────────
 
 
 class TranslateRequest(BaseModel):
     ollama_url:   str       = "http://127.0.0.1:11434"
     model:        str       = "llama3.2"
-    target_lang:  str       = "it-IT"
-    seg_filter:   str       = "skip_alt"
+    target_lang:  str       = "en-US"
+    seg_filter:   str       = "all"
     seg_type:     str       = "all"        # all | only_plain | only_doc
     empty_only:   bool      = True
     output_mode:  str       = "replace"

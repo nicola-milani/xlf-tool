@@ -19,6 +19,7 @@ from xlf_parser import XlfParser, Segment, OutputMode, indent_file
 from llm_client import OllamaClient
 from project_manager import Project, glossary_exact, glossary_substitute
 import ollama_manager
+from config import MULTI_LANG_ENABLED
 
 # ── Language list ──────────────────────────────────────────────────────────────
 
@@ -269,6 +270,7 @@ class MainWindow(QMainWindow):
         self._lbl_glossary.setStyleSheet("color:#1565C0;font-size:12px;")
         self._lbl_proj_langs = QLabel()
         self._lbl_proj_langs.setStyleSheet("color:#555;font-size:12px;")
+        self._lbl_proj_langs.setVisible(MULTI_LANG_ENABLED)
         btn_manage_langs = QPushButton("Languages…")
         btn_manage_langs.setFixedHeight(24)
         btn_manage_langs.setStyleSheet(
@@ -277,6 +279,7 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#0D47A1;}"
         )
         btn_manage_langs.clicked.connect(self._manage_languages)
+        btn_manage_langs.setVisible(MULTI_LANG_ENABLED)
         btn_save_proj = QPushButton("Save to output/")
         btn_save_proj.setFixedHeight(24)
         btn_save_proj.setStyleSheet(
@@ -409,12 +412,14 @@ class MainWindow(QMainWindow):
         )
         self.btn_translate_all.clicked.connect(self._translate_all_languages)
         lv.addWidget(self.btn_translate_all)
+        self.btn_translate_all.setVisible(MULTI_LANG_ENABLED)
         self.chk_parallel = QCheckBox("Run all languages in parallel")
         self.chk_parallel.setToolTip(
             "Start a separate worker thread for each language simultaneously.\n"
             "No per-segment progress is shown; each language saves when done."
         )
         lv.addWidget(self.chk_parallel)
+        self.chk_parallel.setVisible(MULTI_LANG_ENABLED)
 
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setFixedHeight(30)

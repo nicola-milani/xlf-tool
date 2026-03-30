@@ -30,7 +30,10 @@ class OllamaClient:
                     "content": (
                         "You are a professional translator. "
                         "Output ONLY the translated text — no explanations, no notes, no extra words. "
-                        "Preserve all special characters, placeholders, variables, and XML tags exactly."
+                        "Preserve all special characters, placeholders, variables, and XML tags exactly. "
+                        "Preserve the original capitalisation: if a word was uppercase keep it uppercase, if lowercase keep it lowercase. "
+                        "Never convert digits to words: '10' must remain '10', not 'ten' or 'dieci'. "
+                        "Preserve numbered lists exactly: if the source starts with '1.' or '1)' keep that prefix in the translation."
                     ),
                 },
                 {
@@ -80,8 +83,10 @@ class OllamaClient:
                     "role": "system",
                     "content": (
                         "You are a professional translator. "
-                        "Output ONLY the translated numbered list — "
-                        "no explanations, no extra words."
+                        "Output ONLY the translated numbered list — no explanations, no extra words. "
+                        "Preserve the original capitalisation: if a word was uppercase keep it uppercase, if lowercase keep it lowercase. "
+                        "Never convert digits to words: '10' must remain '10', not 'ten' or 'dieci'. "
+                        "Preserve numbered lists exactly: if the source starts with '1.' or '1)' keep that prefix in the translation."
                     ),
                 },
                 {"role": "user", "content": prompt},

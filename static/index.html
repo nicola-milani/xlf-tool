@@ -415,7 +415,7 @@
         <option value="vi-VN">Vietnamese (vi-VN)</option>
         <option value="th-TH">Thai (th-TH)</option>
         <option value="id-ID">Indonesian (id-ID)</option>
-        <option value="en-US">English (en-US)</option>
+        <option value="en-US" selected>English (en-US)</option>
       </select>
       <!-- Project languages (visible when project loaded) -->
       <div id="proj-langs-wrap" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #eef0f3">
@@ -431,8 +431,8 @@
       </div>
       <label>Segment filter</label>
       <select id="seg-filter">
-        <option value="all">All segments</option>
-        <option value="skip_alt" selected>Skip AltText</option>
+        <option value="all" selected>All segments</option>
+        <option value="skip_alt">Skip AltText</option>
         <option value="only_alt">AltText only</option>
       </select>
       <label>Segment type</label>
@@ -447,8 +447,8 @@
       </label>
       <label>Output mode</label>
       <select id="output-mode">
-        <option value="replace">Source replaced (Articulate)</option>
-        <option value="target">Target added (standard XLIFF)</option>
+        <!--<option value="replace">Source replaced (Articulate)</option>-->
+        <option value="target" selected>Target added (standard XLIFF)</option>
       </select>
       <label>Multi-language mode</label>
       <select id="translate-mode">
@@ -558,6 +558,31 @@
 <div id="toast"></div>
 
 <script>
+// ── Feature flags ──────────────────────────────────────────────────────────
+let multiLangEnabled = false;
+
+async function initFeatures() {
+  try {
+    const r = await fetch('/features');
+    const f = await r.json();
+    multiLangEnabled = !!f.multi_lang;
+  } catch (_) {}
+  if (!multiLangEnabled) {
+    document.getElementById('proj-langs-wrap').style.display = 'none';
+    document.getElementById('btn-translate-all').style.display = 'none';
+    document.getElementById('translate-mode').style.display = 'none';
+    document.querySelectorAll('#translate-mode ~ label, label:has(+ #translate-mode)').forEach(el => el.style.display = 'none');
+    // hide the "Multi-language mode" label which precedes the select
+    const section = document.getElementById('translate-mode').closest('.section');
+    if (section) {
+      for (const lbl of section.querySelectorAll('label')) {
+        if (lbl.textContent.trim() === 'Multi-language mode') lbl.style.display = 'none';
+      }
+    }
+  }
+}
+initFeatures();
+
 // ── State ──────────────────────────────────────────────────────────────────
 let jobId = null;
 let segments = [];   // [{unit_id, source, target, note, unit_type, pc_id, is_alt_text}]
@@ -614,8 +639,10 @@ function addToLangsList(code, label, markDirty = true) {
   if (markDirty) {
     projectLangs = getLangsFromList();
     if (isProject) document.getElementById('btn-save-langs').disabled = false;
-    document.getElementById('btn-translate-all').style.display = '';
-    document.getElementById('btn-translate-all').disabled = false;
+    if (multiLangEnabled) {
+      document.getElementById('btn-translate-all').style.display = '';
+      document.getElementById('btn-translate-all').disabled = false;
+    }
   }
 }
 
@@ -704,7 +731,7 @@ async function handleFile(file) {
     projectLangs = [];
     translatedLangs = [];
     document.getElementById('proj-langs-list').innerHTML = '';
-    document.getElementById('proj-langs-wrap').style.display = '';
+    if (multiLangEnabled) document.getElementById('proj-langs-wrap').style.display = '';
     document.getElementById('btn-save-langs').style.display = 'none';
     document.getElementById('btn-translate-all').style.display = 'none';
     document.getElementById('btn-translate-all').disabled = true;
@@ -1154,11 +1181,13 @@ function showProjectPanel(data) {
     const label = entry ? `${entry[0]} (${code})` : code;
     addToLangsList(code, label, false);
   }
-  document.getElementById('proj-langs-wrap').style.display = '';
-  document.getElementById('btn-save-langs').style.display = '';
+  if (multiLangEnabled) {
+    document.getElementById('proj-langs-wrap').style.display = '';
+    document.getElementById('btn-translate-all').style.display = '';
+    document.getElementById('btn-translate-all').disabled = projectLangs.length === 0;
+  }
+  document.getElementById('btn-save-langs').style.display = multiLangEnabled ? '' : 'none';
   document.getElementById('btn-save-langs').disabled = true;
-  document.getElementById('btn-translate-all').style.display = '';
-  document.getElementById('btn-translate-all').disabled = projectLangs.length === 0;
 
   // Update diff lang picker
   updateDiffLangPicker(proj.output || []);
