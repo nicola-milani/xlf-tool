@@ -233,6 +233,8 @@ class MainWindow(QMainWindow):
         self._parallel_workers: list = []   # [(worker, thread, parser, lang), ...]
         self._parallel_remaining: int = 0
         self._last_cache_stats: tuple[int, int] = (0, 0)   # (cache_hits, total_segs)
+        self._web_server = None   # uvicorn.Server instance when web UI is running
+        self._web_thread = None   # daemon thread running the web server
 
         self._build_ui()
         self._refresh_models()
@@ -420,6 +422,33 @@ class MainWindow(QMainWindow):
         self.btn_cancel.clicked.connect(self._cancel_translation)
         lv.addWidget(self.btn_cancel)
         lv.addStretch()
+
+        # ── Web UI ───────────────────────────────────────────────────────────
+        grp_web = QGroupBox("Web UI")
+        gw = QVBoxLayout(grp_web)
+        port_row = QHBoxLayout()
+        port_row.addWidget(QLabel("Port:"))
+        self.edit_web_port = QLineEdit("8080")
+        self.edit_web_port.setFixedWidth(60)
+        port_row.addWidget(self.edit_web_port)
+        port_row.addStretch()
+        gw.addLayout(port_row)
+        self.btn_web = QPushButton("Launch Web UI")
+        self.btn_web.setFixedHeight(30)
+        self.btn_web.setStyleSheet(
+            "QPushButton{background:#0277BD;color:white;border-radius:4px;"
+            "font-size:12px;}"
+            "QPushButton:hover{background:#01579B;}"
+            "QPushButton[running=true]{background:#B71C1C;}"
+            "QPushButton[running=true]:hover{background:#7F0000;}"
+        )
+        self.btn_web.clicked.connect(self._toggle_web_ui)
+        gw.addWidget(self.btn_web)
+        self.lbl_web_status = QLabel("")
+        self.lbl_web_status.setStyleSheet("font-size:11px;color:#0277BD;")
+        self.lbl_web_status.setWordWrap(True)
+        gw.addWidget(self.lbl_web_status)
+        lv.addWidget(grp_web)
         splitter.addWidget(left)
 
         self.table = QTableWidget()
@@ -978,6 +1007,79 @@ class MainWindow(QMainWindow):
         self.table.blockSignals(True)
         self._set_row_color(row, COLOR_TRANSLATED if new_target.strip() else COLOR_EMPTY)
         self.table.blockSignals(False)
+
+    # ── Web UI ─────────────────────────────────────────────────────────────────
+
+    def _toggle_web_ui(self) -> None:
+        if self._web_server is None:
+            self._launch_web_ui()
+        else:
+            self._stop_web_ui()
+
+    def _launch_web_ui(self) -> None:
+        try:
+            import uvicorn
+        except ImportError:
+            QMessageBox.warning(
+                self, "Missing dependency",
+                "uvicorn is not installed.\n\nRun: pip install fastapi uvicorn python-multipart",
+            )
+            return
+
+        try:
+            port = int(self.edit_web_port.text().strip())
+        except ValueError:
+            port = 8080
+
+        from web_server import app as web_app  # noqa: local import
+        import threading
+
+        config = uvicorn.Config(web_app, host="127.0.0.1", port=port, log_level="warning")
+        server = uvicorn.Server(config)
+        self._web_server = server
+
+        def _run():
+            import asyncio
+            asyncio.run(server.serve())
+
+        self._web_thread = threading.Thread(target=_run, daemon=True)
+        self._web_thread.start()
+
+        # Open browser after a short delay to let the server start
+        import threading as _t
+        def _open_browser():
+            import time, webbrowser
+            time.sleep(1.2)
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        _t.Thread(target=_open_browser, daemon=True).start()
+
+        url = f"http://127.0.0.1:{port}"
+        self.btn_web.setText("Stop Web UI")
+        self.btn_web.setStyleSheet(
+            "QPushButton{background:#B71C1C;color:white;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#7F0000;}"
+        )
+        self.edit_web_port.setEnabled(False)
+        self.lbl_web_status.setText(f"Running at {url}")
+        self.status_bar.showMessage(f"Web UI started → {url}")
+
+    def _stop_web_ui(self) -> None:
+        if self._web_server is not None:
+            self._web_server.should_exit = True
+            self._web_server = None
+            self._web_thread = None
+        self.btn_web.setText("Launch Web UI")
+        self.btn_web.setStyleSheet(
+            "QPushButton{background:#0277BD;color:white;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#01579B;}"
+        )
+        self.edit_web_port.setEnabled(True)
+        self.lbl_web_status.setText("")
+        self.status_bar.showMessage("Web UI stopped.")
+
+    def closeEvent(self, event) -> None:
+        self._stop_web_ui()
+        super().closeEvent(event)
 
     # ── Ollama ─────────────────────────────────────────────────────────────────
 
