@@ -181,6 +181,12 @@ class Project:
             "total_size": self.folder_size_str(),
         }
 
+    def output_path_for_lang(self, lang: str) -> Path:
+        """Return the output path for a specific target language."""
+        xlf = self.find_xlf()
+        stem = xlf.stem if xlf else "translated"
+        return self.output_dir / f"{stem}_{lang}.xlf"
+
     # ── ZIP ───────────────────────────────────────────────────────────────────
 
     def make_zip(self) -> Path:

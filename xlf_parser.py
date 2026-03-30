@@ -107,12 +107,39 @@ class XlfParser:
             self.original    = file_el.get("original", "")
             break
         for tu in self._root.iter(self._q("trans-unit")):
-            uid    = tu.get("id", "")
-            source = self._text(tu.find(self._q("source")))
-            target = self._text(tu.find(self._q("target")))
-            note   = self._text(tu.find(self._q("note")))
-            if source:
-                self.segments.append(Segment(unit_id=uid, source=source, target=target, note=note))
+            uid      = tu.get("id", "")
+            datatype = tu.get("datatype", "")
+            note     = self._text(tu.find(self._q("note")))
+
+            if datatype == "x-DocumentState":
+                # Rich-text unit: translatable text lives inside
+                # <g ctype="x-text" id="..."> elements.
+                src_el = tu.find(self._q("source"))
+                tgt_el = tu.find(self._q("target"))
+                if src_el is None:
+                    continue
+                for g_el in src_el.iter(self._q("g")):
+                    if g_el.get("ctype") != "x-text":
+                        continue
+                    text = (g_el.text or "").strip()
+                    if not text:
+                        continue
+                    g_id = g_el.get("id", "")
+                    tgt_text = ""
+                    if tgt_el is not None:
+                        for tgt_g in tgt_el.iter(self._q("g")):
+                            if tgt_g.get("ctype") == "x-text" and tgt_g.get("id") == g_id:
+                                tgt_text = (tgt_g.text or "").strip()
+                                break
+                    self.segments.append(Segment(
+                        unit_id=uid, source=text, target=tgt_text,
+                        note=note, unit_type="x-DocumentState", pc_id=g_id,
+                    ))
+            else:
+                source = self._text(tu.find(self._q("source")))
+                target = self._text(tu.find(self._q("target")))
+                if source:
+                    self.segments.append(Segment(unit_id=uid, source=source, target=target, note=note))
 
     def _parse_20(self) -> None:
         self.source_lang = self._root.get("srcLang", "")
@@ -195,6 +222,22 @@ class XlfParser:
         else:
             self._root.set("trgLang", lang)
 
+    def _register_all_namespaces(self) -> None:
+        """
+        Register every namespace prefix found in the original file so that
+        ET preserves them verbatim when writing (prevents ns0:, ns1: mangling).
+        """
+        text = self._original_bytes.decode("utf-8", errors="replace")
+        # Prefixed namespaces: xmlns:prefix="uri" or xmlns:prefix='uri'
+        for prefix, uri in re.findall(
+            r'xmlns:([a-zA-Z_][\w.-]*)=["\']([^"\']+)["\']', text
+        ):
+            ET.register_namespace(prefix, uri)
+        # Default namespace: xmlns="uri" or xmlns='uri'
+        for uri in re.findall(r'(?<![:\w])xmlns=["\']([^"\']+)["\']', text):
+            ET.register_namespace("", uri)
+            break
+
     # ── in-memory XML rendering (for diff view) ──────────────────────────────
 
     def get_source_xml(self) -> str:
@@ -230,8 +273,7 @@ class XlfParser:
                 self._apply_12(translations, mode)
             else:
                 self._apply_20(translations, mode)
-            if self._ns:
-                ET.register_namespace("", self._ns)
+            self._register_all_namespaces()
             try:
                 ET.indent(self._root, space="  ")
             except AttributeError:
@@ -244,6 +286,65 @@ class XlfParser:
             self._root = orig_root
 
     # ── save ────────────────────────────────────────────────────────────────
+
+    def _build_faithful_output(self, xml_body: bytes) -> bytes:
+        """
+        Reconstruct the final output bytes, preserving from the original file:
+          - UTF-8 BOM (if present)
+          - XML declaration verbatim (quote style, encoding case)
+          - Namespace declarations on the root element that ET drops because
+            their prefix is never used in element/attribute names (e.g.
+            xmlns:xsd, xmlns:xsi in Articulate Storyline exports).
+        """
+        orig = self._original_bytes
+
+        # BOM
+        bom = b"\xef\xbb\xbf" if orig.startswith(b"\xef\xbb\xbf") else b""
+        orig_no_bom = orig[len(bom):]
+
+        # Original XML declaration (verbatim)
+        if orig_no_bom.startswith(b"<?xml"):
+            end = orig_no_bom.find(b"?>")
+            orig_decl = orig_no_bom[: end + 2] if end != -1 else b""
+        else:
+            orig_decl = b""
+
+        # Namespace declarations in the original root element opening tag
+        orig_after_decl = orig_no_bom[len(orig_decl):]
+        root_end = orig_after_decl.find(b">")
+        orig_root_tag = orig_after_decl[: root_end + 1] if root_end != -1 else b""
+        orig_ns: dict = {
+            m.group(1): m.group(2)
+            for m in re.finditer(
+                rb'(xmlns(?::[a-zA-Z_][\w.-]*)?)=["\']([^"\']*)["\']', orig_root_tag
+            )
+        }
+
+        # Inject namespace declarations that ET dropped from the output root element
+        out_root_end = xml_body.find(b">")
+        if out_root_end != -1 and orig_ns:
+            out_root_tag = xml_body[: out_root_end + 1]
+            present = {
+                m.group(1)
+                for m in re.finditer(rb"(xmlns(?::[a-zA-Z_][\w.-]*)?)=", out_root_tag)
+            }
+            missing = [
+                b'%s="%s"' % (k, v)
+                for k, v in orig_ns.items()
+                if k not in present
+            ]
+            if missing:
+                inject_at = out_root_end
+                if xml_body[inject_at - 1 : inject_at] == b"/":
+                    inject_at -= 1  # self-closing root (unusual but safe)
+                xml_body = (
+                    xml_body[:inject_at]
+                    + b" "
+                    + b" ".join(missing)
+                    + xml_body[inject_at:]
+                )
+
+        return bom + orig_decl + xml_body
 
     def save(self, filepath: str, mode: OutputMode = OutputMode.TARGET) -> None:
         """
@@ -266,24 +367,31 @@ class XlfParser:
         else:
             self._apply_20(translations, mode)
 
-        if self._ns:
-            ET.register_namespace("", self._ns)
+        # Register every namespace prefix from the original file so ET writes
+        # them verbatim instead of generating ns0:, ns1:, … aliases.
+        self._register_all_namespaces()
 
-        # Indent only in TARGET mode — Articulate re-imports may be
-        # sensitive to added whitespace inside text nodes.
-        if mode == OutputMode.TARGET:
-            try:
-                ET.indent(self._root, space="  ")
-            except AttributeError:
-                pass
-
-        self._tree.write(filepath, encoding="UTF-8", xml_declaration=True)
+        # Do NOT call ET.indent() — it rewrites all whitespace in the document,
+        # altering indentation of elements we never touched.  New <target>
+        # elements receive their whitespace individually in _apply_*.
+        buf = io.BytesIO()
+        self._tree.write(buf, encoding="UTF-8", xml_declaration=False)
+        xml_body = buf.getvalue()
+        output = self._build_faithful_output(xml_body)
+        with open(filepath, "wb") as fh:
+            fh.write(output)
 
     # ── apply 1.2 ───────────────────────────────────────────────────────────
 
     def _apply_12(self, translations: dict, mode: OutputMode) -> None:
         for tu in self._root.iter(self._q("trans-unit")):
-            uid        = tu.get("id", "")
+            uid      = tu.get("id", "")
+            datatype = tu.get("datatype", "")
+
+            if datatype == "x-DocumentState":
+                self._apply_12_doc_state(tu, uid, translations, mode)
+                continue
+
             translated = translations.get((uid, ""), "")
             if not translated:
                 continue
@@ -298,8 +406,60 @@ class XlfParser:
             else:
                 tgt_el = tu.find(self._q("target"))
                 if tgt_el is None:
-                    tgt_el = ET.SubElement(tu, self._q("target"))
+                    tgt_el = ET.Element(self._q("target"))
+                    # Place <target> immediately after <source>.
+                    src_el = tu.find(self._q("source"))
+                    if src_el is not None:
+                        idx = list(tu).index(src_el)
+                        # Inherit the tail of <source> so the new element sits
+                        # on its own line with the same indentation.
+                        tgt_el.tail = src_el.tail
+                        tu.insert(idx + 1, tgt_el)
+                    else:
+                        tu.append(tgt_el)
                 tgt_el.text = translated
+
+    def _apply_12_doc_state(
+        self,
+        tu: ET.Element,
+        uid: str,
+        translations: dict,
+        mode: OutputMode,
+    ) -> None:
+        """Handle x-DocumentState inline-markup units for XLIFF 1.2.
+
+        Translatable text lives inside <g ctype="x-text" id="..."> elements.
+        In REPLACE mode the source <g> text is updated in-place.
+        In TARGET mode a deep copy of <source> becomes <target> with text swapped.
+        """
+        src_el = tu.find(self._q("source"))
+        if src_el is None:
+            return
+
+        if mode == OutputMode.REPLACE:
+            for g_el in src_el.iter(self._q("g")):
+                if g_el.get("ctype") != "x-text":
+                    continue
+                translated = translations.get((uid, g_el.get("id", "")), "")
+                if translated:
+                    g_el.text = translated
+            tgt_el = tu.find(self._q("target"))
+            if tgt_el is not None:
+                tu.remove(tgt_el)
+        else:
+            tgt_el = tu.find(self._q("target"))
+            if tgt_el is None:
+                tgt_el = copy.deepcopy(src_el)
+                tgt_el.tag = self._q("target")
+                idx = list(tu).index(src_el)
+                tgt_el.tail = src_el.tail
+                tu.insert(idx + 1, tgt_el)
+            for g_el in tgt_el.iter(self._q("g")):
+                if g_el.get("ctype") != "x-text":
+                    continue
+                translated = translations.get((uid, g_el.get("id", "")), "")
+                if translated:
+                    g_el.text = translated
 
     # ── apply 2.0 ───────────────────────────────────────────────────────────
 
@@ -329,7 +489,9 @@ class XlfParser:
                         tgt_el = seg.find(self._q("target"))
                         if tgt_el is None:
                             tgt_el = ET.Element(self._q("target"))
-                            seg.insert(list(seg).index(src_el) + 1, tgt_el)
+                            idx = list(seg).index(src_el)
+                            tgt_el.tail = src_el.tail
+                            seg.insert(idx + 1, tgt_el)
                         tgt_el.text = translated
 
     def _apply_20_doc_state(

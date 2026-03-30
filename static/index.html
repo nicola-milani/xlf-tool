@@ -321,6 +321,24 @@
     z-index: 1000;
   }
   #toast.show { opacity: 1; }
+  /* ── Language downloads ── */
+  .lang-dl-btn {
+    display: block; width: 100%; padding: 5px 8px; margin-top: 4px;
+    background: #0d47a1; color: #fff; border: none; border-radius: 5px;
+    font-size: 12px; font-weight: 600; cursor: pointer; text-align: left;
+  }
+  .lang-dl-btn:hover { background: #1565c0; }
+  /* ── Project lang select ── */
+  #proj-langs-list li {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 3px 8px; font-size: 12px; color: #1a1a1a;
+    background: #e3f2fd; border-radius: 3px; margin: 2px 0;
+  }
+  #proj-langs-list li button {
+    background: none; border: none; cursor: pointer; color: #c62828;
+    font-size: 14px; line-height: 1; padding: 0 2px; font-weight: bold;
+  }
+  #proj-langs-list li button:hover { color: #7f0000; }
 </style>
 </head>
 <body>
@@ -399,11 +417,29 @@
         <option value="id-ID">Indonesian (id-ID)</option>
         <option value="en-US">English (en-US)</option>
       </select>
+      <!-- Project languages (visible when project loaded) -->
+      <div id="proj-langs-wrap" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid #eef0f3">
+        <div class="section-title" style="margin-bottom:6px">Project Languages</div>
+        <div style="display:flex;gap:4px;align-items:center;margin-bottom:4px">
+          <select id="lang-add-select" style="flex:1;font-size:12px;padding:5px 6px;border:1px solid #ccc;border-radius:4px;background:#fafafa"></select>
+          <button id="btn-add-lang" style="padding:5px 10px;border:none;background:#1565c0;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;font-weight:600;white-space:nowrap">+ Add</button>
+        </div>
+        <ul id="proj-langs-list" style="list-style:none;padding:4px;margin:0 0 4px;min-height:24px;max-height:120px;overflow-y:auto;border:1px solid #e0e0e0;border-radius:4px;background:#fafafa"></ul>
+        <button class="btn" id="btn-save-langs" style="background:#546e7a;color:#fff;margin-top:4px" disabled>
+          💾 Save languages
+        </button>
+      </div>
       <label>Segment filter</label>
       <select id="seg-filter">
         <option value="all">All segments</option>
         <option value="skip_alt" selected>Skip AltText</option>
         <option value="only_alt">AltText only</option>
+      </select>
+      <label>Segment type</label>
+      <select id="seg-type">
+        <option value="all">All types</option>
+        <option value="only_plain">Plain text only</option>
+        <option value="only_doc">Document state only</option>
       </select>
       <label>
         <input type="checkbox" id="chk-empty-only" checked style="margin-right:4px">
@@ -414,6 +450,11 @@
         <option value="replace">Source replaced (Articulate)</option>
         <option value="target">Target added (standard XLIFF)</option>
       </select>
+      <label>Multi-language mode</label>
+      <select id="translate-mode">
+        <option value="sequential">Sequential (one at a time)</option>
+        <option value="parallel">Parallel (all at once)</option>
+      </select>
     </div>
 
     <!-- Progress -->
@@ -421,13 +462,18 @@
       <div class="section-title" style="padding:0 0 6px">Progress</div>
       <div id="progress-bar-outer"><div id="progress-bar-inner"></div></div>
       <div id="progress-label">—</div>
+      <div id="cache-summary" style="display:none;margin-top:6px;padding:6px 10px;background:#e8f5e9;border-radius:4px;font-size:12px;color:#2e7d32"></div>
     </div>
 
     <!-- Actions -->
     <div class="section">
       <button class="btn btn-primary"  id="btn-translate" disabled>▶ Translate</button>
+      <button class="btn btn-primary" id="btn-translate-all" disabled style="display:none;background:#1565c0">▶▶ Translate All Languages</button>
       <button class="btn btn-danger"   id="btn-cancel"    disabled>■ Cancel</button>
       <button class="btn btn-download" id="btn-download"  disabled>⬇ Download translated XLF</button>
+      <div id="lang-downloads-wrap" style="display:none;margin-top:4px">
+        <div id="lang-downloads"></div>
+      </div>
       <button class="btn btn-zip"      id="btn-zip"       disabled style="display:none">⬇ Download Project ZIP</button>
       <button class="btn btn-compare"  id="btn-compare"   disabled>⇄ Compare source / translated</button>
     </div>
@@ -487,6 +533,9 @@
   <div id="diff-modal">
     <header>
       <span>Source vs Translated — XLF diff</span>
+      <select id="diff-lang-select" style="display:none;font-size:12px;padding:3px 6px;border-radius:4px;border:1px solid rgba(255,255,255,.3);background:#2a4e7a;color:#fff;margin-right:8px">
+        <option value="">Current (in-memory)</option>
+      </select>
       <button id="btn-diff-close">✕ Close</button>
     </header>
     <div class="diff-cols">
@@ -513,6 +562,66 @@
 let jobId = null;
 let segments = [];   // [{unit_id, source, target, note, unit_type, pc_id, is_alt_text}]
 let evtSource = null;
+let projectLangs = [];      // configured target languages for the project
+let translatedLangs = [];   // languages translated in this session
+
+const ALL_LANGUAGES = [
+  ["Italian","it-IT"],["French","fr-FR"],["German","de-DE"],["Spanish","es-ES"],
+  ["Portuguese (Portugal)","pt-PT"],["Portuguese (Brazil)","pt-BR"],["Dutch","nl-NL"],
+  ["Polish","pl-PL"],["Russian","ru-RU"],["Chinese Simplified","zh-CN"],
+  ["Chinese Traditional","zh-TW"],["Japanese","ja-JP"],["Korean","ko-KR"],
+  ["Arabic","ar-SA"],["Turkish","tr-TR"],["Swedish","sv-SE"],["Danish","da-DK"],
+  ["Finnish","fi-FI"],["Norwegian","nb-NO"],["Czech","cs-CZ"],["Hungarian","hu-HU"],
+  ["Romanian","ro-RO"],["Bulgarian","bg-BG"],["Croatian","hr-HR"],["Slovak","sk-SK"],
+  ["Greek","el-GR"],["Ukrainian","uk-UA"],["Hebrew","he-IL"],["Vietnamese","vi-VN"],
+  ["Thai","th-TH"],["Indonesian","id-ID"],
+];
+
+function buildLangAddSelect() {
+  const sel = document.getElementById('lang-add-select');
+  sel.innerHTML = '';
+  for (const [name, code] of ALL_LANGUAGES) {
+    const opt = document.createElement('option');
+    opt.value = code;
+    opt.textContent = `${name} (${code})`;
+    sel.appendChild(opt);
+  }
+}
+buildLangAddSelect();
+
+function addToLangsList(code, label, markDirty = true) {
+  const ul = document.getElementById('proj-langs-list');
+  for (const li of ul.children) {
+    if (li.dataset.code === code) return; // already present
+  }
+  const li = document.createElement('li');
+  li.dataset.code = code;
+  const span = document.createElement('span');
+  span.textContent = label;
+  const btn = document.createElement('button');
+  btn.textContent = '✕';
+  btn.title = 'Remove';
+  btn.addEventListener('click', () => {
+    ul.removeChild(li);
+    projectLangs = getLangsFromList();
+    const hasLangs = projectLangs.length > 0;
+    document.getElementById('btn-translate-all').disabled = !hasLangs;
+    if (!hasLangs) document.getElementById('btn-translate-all').style.display = 'none';
+    if (isProject) document.getElementById('btn-save-langs').disabled = false;
+  });
+  li.append(span, btn);
+  ul.appendChild(li);
+  if (markDirty) {
+    projectLangs = getLangsFromList();
+    if (isProject) document.getElementById('btn-save-langs').disabled = false;
+    document.getElementById('btn-translate-all').style.display = '';
+    document.getElementById('btn-translate-all').disabled = false;
+  }
+}
+
+function getLangsFromList() {
+  return Array.from(document.getElementById('proj-langs-list').children).map(li => li.dataset.code);
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function toast(msg, dur = 3000) {
@@ -526,6 +635,20 @@ function segKey(unit_id, pc_id) { return unit_id + '\x00' + (pc_id || ''); }
 
 function rowId(unit_id, pc_id) {
   return 'row-' + btoa(encodeURIComponent(segKey(unit_id, pc_id))).replace(/=/g,'');
+}
+
+function addLangDownloadButton(lang) {
+  const wrap = document.getElementById('lang-downloads-wrap');
+  const cont = document.getElementById('lang-downloads');
+  wrap.style.display = '';
+  const btn = document.createElement('button');
+  btn.className = 'lang-dl-btn';
+  btn.textContent = `⬇ Download ${lang}`;
+  btn.addEventListener('click', () => {
+    const mode = document.getElementById('output-mode').value;
+    window.location = `/download/${jobId}?mode=${mode}&lang=${encodeURIComponent(lang)}`;
+  });
+  cont.appendChild(btn);
 }
 
 // ── File upload ────────────────────────────────────────────────────────────
@@ -578,6 +701,15 @@ async function handleFile(file) {
     updateStats();
 
     isProject = false;
+    projectLangs = [];
+    translatedLangs = [];
+    document.getElementById('proj-langs-list').innerHTML = '';
+    document.getElementById('proj-langs-wrap').style.display = '';
+    document.getElementById('btn-save-langs').style.display = 'none';
+    document.getElementById('btn-translate-all').style.display = 'none';
+    document.getElementById('btn-translate-all').disabled = true;
+    document.getElementById('lang-downloads-wrap').style.display = 'none';
+    document.getElementById('diff-lang-select').style.display = 'none';
     document.getElementById('project-panel').classList.remove('open');
     document.getElementById('btn-zip').style.display  = 'none';
     document.getElementById('btn-translate').disabled = false;
@@ -679,6 +811,79 @@ async function onTargetBlur(e) {
 // ── Model refresh ──────────────────────────────────────────────────────────
 document.getElementById('btn-refresh-models').addEventListener('click', refreshModels);
 
+document.getElementById('btn-add-lang').addEventListener('click', () => {
+  const sel = document.getElementById('lang-add-select');
+  const code = sel.value;
+  const label = sel.options[sel.selectedIndex]?.text || code;
+  addToLangsList(code, label, true);
+});
+
+document.getElementById('btn-save-langs').addEventListener('click', async () => {
+  if (!jobId || !isProject) return;
+  const langs = getLangsFromList();
+  projectLangs = langs;
+  document.getElementById('btn-translate-all').disabled = langs.length === 0;
+  try {
+    await fetch(`/project/${jobId}/languages`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({target_langs: langs}),
+    });
+    toast(`Languages saved: ${langs.join(', ') || 'none'}`);
+    document.getElementById('btn-save-langs').disabled = true;
+  } catch (err) {
+    toast('Error saving languages: ' + err.message, 4000);
+  }
+});
+
+document.getElementById('btn-translate-all').addEventListener('click', startTranslateAll);
+
+async function startTranslateAll() {
+  if (!jobId || projectLangs.length === 0) return;
+
+  document.getElementById('btn-translate').disabled     = true;
+  document.getElementById('btn-translate-all').disabled = true;
+  document.getElementById('btn-cancel').disabled        = false;
+  document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('cache-summary').style.display = 'none';
+  setProgress(0, 0, '');
+
+  const body = {
+    ollama_url:   document.getElementById('ollama-url').value.trim(),
+    model:        document.getElementById('model-select').value,
+    target_lang:  projectLangs[0],
+    target_langs: projectLangs,
+    seg_filter:   document.getElementById('seg-filter').value,
+    seg_type:     document.getElementById('seg-type').value,
+    empty_only:   document.getElementById('chk-empty-only').checked,
+    output_mode:  document.getElementById('output-mode').value,
+    parallel:     document.getElementById('translate-mode').value === 'parallel',
+  };
+
+  // Clear previous lang download buttons
+  document.getElementById('lang-downloads').innerHTML = '';
+  document.getElementById('lang-downloads-wrap').style.display = 'none';
+  translatedLangs = [];
+
+  try {
+    const r = await fetch('/translate/' + jobId, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) { const e = await r.json(); throw new Error(e.detail || r.statusText); }
+  } catch (err) {
+    toast('Could not start: ' + err.message, 5000);
+    resetTranslateUI();
+    return;
+  }
+
+  if (evtSource) evtSource.close();
+  evtSource = new EventSource('/progress/' + jobId);
+  evtSource.onmessage = handleProgressEvent;
+  evtSource.onerror = () => { toast('Connection lost', 4000); resetTranslateUI(); };
+}
+
 async function refreshModels() {
   const url   = document.getElementById('ollama-url').value.trim();
   const dot   = document.getElementById('ollama-dot');
@@ -715,6 +920,7 @@ async function startTranslation() {
   document.getElementById('btn-translate').disabled = true;
   document.getElementById('btn-cancel').disabled    = false;
   document.getElementById('progress-wrap').style.display = 'block';
+  document.getElementById('cache-summary').style.display = 'none';
   setProgress(0, 0, '');
 
   const body = {
@@ -722,6 +928,7 @@ async function startTranslation() {
     model:       document.getElementById('model-select').value,
     target_lang: document.getElementById('tgt-lang').value,
     seg_filter:  document.getElementById('seg-filter').value,
+    seg_type:    document.getElementById('seg-type').value,
     empty_only:  document.getElementById('chk-empty-only').checked,
     output_mode: document.getElementById('output-mode').value,
   };
@@ -756,6 +963,22 @@ function handleProgressEvent(e) {
   const data = JSON.parse(e.data);
 
   if (data.heartbeat) return;
+
+  if (data.lang_start) {
+    document.getElementById('progress-label').textContent =
+      `Language ${data.lang_index + 1} / ${data.total_langs}: ${data.lang_start}`;
+    return;
+  }
+
+  if (data.lang_done) {
+    translatedLangs.push(data.lang_done);
+    addLangDownloadButton(data.lang_done);
+    // Reload table with current parser state
+    for (const seg of segments) { seg.target = ''; }
+    for (const tr of document.querySelectorAll('#tbody tr')) setRowClass(tr, {target: ''});
+    updateStats();
+    return;
+  }
 
   if (data.current !== undefined) {
     setProgress(data.current, data.total, data.unit_id);
@@ -794,6 +1017,7 @@ function handleProgressEvent(e) {
     toast('Translation complete!');
     resetTranslateUI();
     evtSource.close(); evtSource = null;
+    showCacheSummary(data.cache_hits, data.total_segs, data.llm_calls);
   }
 
   if (data.error) {
@@ -819,6 +1043,15 @@ function setProgress(current, total, unit_id) {
 function resetTranslateUI() {
   document.getElementById('btn-translate').disabled = false;
   document.getElementById('btn-cancel').disabled    = true;
+}
+
+function showCacheSummary(hits, total, llmCalls) {
+  const el = document.getElementById('cache-summary');
+  if (!el || !total) return;
+  if (!hits) { el.style.display = 'none'; return; }
+  const pct = Math.round(hits * 100 / total);
+  el.textContent = `✓ Traduzione completata — ${total} segmenti totali, ${hits} dalla cache (${pct}% risparmiati), ${llmCalls} chiamate LLM effettuate`;
+  el.style.display = '';
 }
 
 // ── Download XLF ───────────────────────────────────────────────────────────
@@ -912,7 +1145,54 @@ function showProjectPanel(data) {
   addFiles('input',  proj.input);
   addFiles('output', proj.output);
 
+  // Load configured project languages
+  projectLangs = meta.target_langs || [];
+  const langUl = document.getElementById('proj-langs-list');
+  langUl.innerHTML = '';
+  for (const code of projectLangs) {
+    const entry = ALL_LANGUAGES.find(([, c]) => c === code);
+    const label = entry ? `${entry[0]} (${code})` : code;
+    addToLangsList(code, label, false);
+  }
+  document.getElementById('proj-langs-wrap').style.display = '';
+  document.getElementById('btn-save-langs').style.display = '';
+  document.getElementById('btn-save-langs').disabled = true;
+  document.getElementById('btn-translate-all').style.display = '';
+  document.getElementById('btn-translate-all').disabled = projectLangs.length === 0;
+
+  // Update diff lang picker
+  updateDiffLangPicker(proj.output || []);
+
+  // Per-language download buttons for already-translated langs
+  const langDownCont = document.getElementById('lang-downloads');
+  langDownCont.innerHTML = '';
+  document.getElementById('lang-downloads-wrap').style.display = 'none';
+  if (proj.output) {
+    for (const f of proj.output) {
+      // Match files like name_lang.xlf
+      const match = f.name.match(/_([a-z]{2}-[A-Z]{2})\.xlf$/);
+      if (match) {
+        addLangDownloadButton(match[1]);
+      }
+    }
+  }
+
   document.getElementById('project-panel').classList.add('open');
+}
+
+function updateDiffLangPicker(outputFiles) {
+  const sel = document.getElementById('diff-lang-select');
+  const langs = [];
+  for (const f of outputFiles || []) {
+    const match = f.name.match(/_([a-z]{2}-[A-Z]{2})\.xlf$/);
+    if (match) langs.push(match[1]);
+  }
+  if (langs.length > 0) {
+    sel.innerHTML = langs.map(l => `<option value="${l}">${l}</option>`).join('');
+    sel.style.display = '';
+  } else {
+    sel.style.display = 'none';
+  }
 }
 
 async function refreshProjectPanel() {
@@ -941,6 +1221,7 @@ async function refreshProjectPanel() {
     };
     addFiles('input',  proj.input);
     addFiles('output', proj.output);
+    updateDiffLangPicker(proj.output);
   } catch {}
 }
 
@@ -975,7 +1256,9 @@ document.getElementById('diff-overlay').addEventListener('click', e => {
 
 async function openDiff() {
   if (!jobId) return;
-  const mode = document.getElementById('output-mode').value;
+  const mode    = document.getElementById('output-mode').value;
+  const langSel = document.getElementById('diff-lang-select');
+  const lang    = langSel.style.display !== 'none' ? langSel.value : '';
   const leftPre  = document.getElementById('diff-left');
   const rightPre = document.getElementById('diff-right');
   leftPre.textContent = 'Loading…';
@@ -983,9 +1266,14 @@ async function openDiff() {
   document.getElementById('diff-overlay').classList.add('open');
 
   try {
-    const r = await fetch(`/diff/${jobId}?mode=${mode}`);
+    let url = `/diff/${jobId}?mode=${mode}`;
+    if (lang) url += `&lang=${encodeURIComponent(lang)}`;
+    const r = await fetch(url);
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const data = await r.json();
+    // Update right column header
+    document.querySelector('#diff-modal .diff-col:last-child .diff-col-header').textContent =
+      data.lang ? `Translated (${data.lang})` : 'Translated';
     renderDiff(data.source, data.translated);
   } catch (err) {
     leftPre.textContent = 'Error: ' + err.message;

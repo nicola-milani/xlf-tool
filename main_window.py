@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QPushButton, QLabel, QLineEdit, QComboBox, QTableWidget,
     QTableWidgetItem, QFileDialog, QProgressBar, QCheckBox,
     QGroupBox, QStatusBar, QHeaderView, QMessageBox, QFrame,
+    QScrollArea, QDialog, QListWidget, QListWidgetItem,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QObject, Slot
 from PySide6.QtGui import QColor, QBrush, QAction
@@ -48,13 +49,84 @@ FG_EMPTY         = QColor("#C62828")
 FG_TRANSLATED    = QColor("#2E7D32")
 
 
+class TargetLanguagesDialog(QDialog):
+    """Dialog for selecting multiple target languages via dropdown + list."""
+    def __init__(self, current_selection=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Project Target Languages")
+        self.resize(360, 360)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Add languages to the project:"))
+
+        # Dropdown + Add row
+        add_row = QHBoxLayout()
+        self._combo = QComboBox()
+        for name, code in LANGUAGES:
+            self._combo.addItem(f"{name}  ({code})", code)
+        btn_add = QPushButton("Add")
+        btn_add.setFixedWidth(60)
+        btn_add.clicked.connect(self._add_selected)
+        add_row.addWidget(self._combo, stretch=1)
+        add_row.addWidget(btn_add)
+        layout.addLayout(add_row)
+
+        layout.addWidget(QLabel("Selected languages:"))
+        self._list = QListWidget()
+        layout.addWidget(self._list, stretch=1)
+
+        btn_remove = QPushButton("Remove selected")
+        btn_remove.clicked.connect(self._remove_selected)
+        layout.addWidget(btn_remove)
+
+        # Pre-populate
+        for code in (current_selection or []):
+            self._add_by_code(code)
+
+        buttons = QHBoxLayout()
+        btn_ok = QPushButton("OK")
+        btn_ok.setDefault(True)
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel = QPushButton("Cancel")
+        btn_cancel.clicked.connect(self.reject)
+        buttons.addStretch()
+        buttons.addWidget(btn_ok)
+        buttons.addWidget(btn_cancel)
+        layout.addLayout(buttons)
+
+    def _add_selected(self):
+        code = self._combo.currentData()
+        for i in range(self._list.count()):
+            if self._list.item(i).data(Qt.UserRole) == code:
+                return
+        item = QListWidgetItem(self._combo.currentText())
+        item.setData(Qt.UserRole, code)
+        self._list.addItem(item)
+
+    def _add_by_code(self, code: str):
+        for name, c in LANGUAGES:
+            if c == code:
+                item = QListWidgetItem(f"{name}  ({c})")
+                item.setData(Qt.UserRole, c)
+                self._list.addItem(item)
+                break
+
+    def _remove_selected(self):
+        for item in self._list.selectedItems():
+            self._list.takeItem(self._list.row(item))
+
+    def selected_langs(self) -> list:
+        return [self._list.item(i).data(Qt.UserRole) for i in range(self._list.count())]
+
+
 # ── Background translation worker ─────────────────────────────────────────────
 
 class TranslationWorker(QObject):
-    unit_done = Signal(str, str, str)   # unit_id, pc_id, translated_text
-    progress  = Signal(int, int, str)   # current, total, unit_id
-    finished  = Signal()
-    error     = Signal(str)
+    unit_done   = Signal(str, str, str)   # unit_id, pc_id, translated_text
+    progress    = Signal(int, int, str)   # current, total, unit_id
+    finished    = Signal()
+    error       = Signal(str)
+    cache_stats = Signal(int, int)        # cache_hits, total_segs
 
     def __init__(
         self,
@@ -82,6 +154,9 @@ class TranslationWorker(QObject):
             for uid, grp in groupby(self._segments, key=lambda s: s.unit_id)
         ]
         total = len(groups)
+        translation_cache: dict[str, str] = {}
+        cache_hits = 0
+        total_segs = 0
         for i, (uid, group_segs) in enumerate(groups):
             if self._cancelled:
                 break
@@ -89,22 +164,33 @@ class TranslationWorker(QObject):
             try:
                 if len(group_segs) == 1:
                     seg   = group_segs[0]
+                    total_segs += 1
                     gloss = glossary_exact(seg.source, self._glossary)
-                    if gloss is not None:
+                    if seg.source in translation_cache:
+                        translated = translation_cache[seg.source]
+                        cache_hits += 1
+                    elif gloss is not None:
                         translated = gloss
+                        translation_cache[seg.source] = translated
                     else:
                         translated = self._client.translate(
                             seg.source, self._source_lang, self._target_lang
                         )
                         translated = glossary_substitute(translated, self._glossary)
+                        translation_cache[seg.source] = translated
                     self.unit_done.emit(seg.unit_id, seg.pc_id, translated)
                 else:
                     results: list = [None] * len(group_segs)
                     pending_idx   = []
                     for j, seg in enumerate(group_segs):
+                        total_segs += 1
                         gloss = glossary_exact(seg.source, self._glossary)
-                        if gloss is not None:
+                        if seg.source in translation_cache:
+                            results[j] = translation_cache[seg.source]
+                            cache_hits += 1
+                        elif gloss is not None:
                             results[j] = gloss
+                            translation_cache[seg.source] = gloss
                         else:
                             pending_idx.append(j)
                     if pending_idx:
@@ -119,11 +205,13 @@ class TranslationWorker(QObject):
                             )
                         for j, t in zip(pending_idx, llm):
                             results[j] = glossary_substitute(t, self._glossary)
+                            translation_cache[group_segs[j].source] = results[j]
                     for seg, translated in zip(group_segs, results):
                         self.unit_done.emit(seg.unit_id, seg.pc_id, translated)
             except Exception as exc:
                 self.error.emit(str(exc))
                 return
+        self.cache_stats.emit(cache_hits, total_segs)
         self.finished.emit()
 
 
@@ -139,6 +227,12 @@ class MainWindow(QMainWindow):
         self._project:  Optional[Project]           = None
         self._thread:   Optional[QThread]           = None
         self._worker:   Optional[TranslationWorker] = None
+        self._project_metadata: dict = {}
+        self._pending_translate_langs: list = []
+        self._auto_save_on_finish: bool = False
+        self._parallel_workers: list = []   # [(worker, thread, parser, lang), ...]
+        self._parallel_remaining: int = 0
+        self._last_cache_stats: tuple[int, int] = (0, 0)   # (cache_hits, total_segs)
 
         self._build_ui()
         self._refresh_models()
@@ -171,6 +265,16 @@ class MainWindow(QMainWindow):
         self._lbl_proj_size.setStyleSheet("color:#2E7D32;font-size:12px;")
         self._lbl_glossary   = QLabel()
         self._lbl_glossary.setStyleSheet("color:#1565C0;font-size:12px;")
+        self._lbl_proj_langs = QLabel()
+        self._lbl_proj_langs.setStyleSheet("color:#555;font-size:12px;")
+        btn_manage_langs = QPushButton("Languages…")
+        btn_manage_langs.setFixedHeight(24)
+        btn_manage_langs.setStyleSheet(
+            "QPushButton{background:#1565C0;color:white;border-radius:3px;"
+            "padding:0 8px;font-size:12px;}"
+            "QPushButton:hover{background:#0D47A1;}"
+        )
+        btn_manage_langs.clicked.connect(self._manage_languages)
         btn_save_proj = QPushButton("Save to output/")
         btn_save_proj.setFixedHeight(24)
         btn_save_proj.setStyleSheet(
@@ -184,6 +288,8 @@ class MainWindow(QMainWindow):
         pb.addWidget(self._lbl_proj_files)
         pb.addWidget(self._lbl_proj_size)
         pb.addWidget(self._lbl_glossary)
+        pb.addWidget(self._lbl_proj_langs)
+        pb.addWidget(btn_manage_langs)
         pb.addStretch()
         pb.addWidget(btn_save_proj)
         self._project_bar.setVisible(False)
@@ -265,6 +371,12 @@ class MainWindow(QMainWindow):
         self.combo_seg_filter.addItem("AltText only", "only_alt")
         self.combo_seg_filter.setCurrentIndex(1)
         gt.addWidget(self.combo_seg_filter)
+        gt.addWidget(QLabel("Segment type:"))
+        self.combo_seg_type = QComboBox()
+        self.combo_seg_type.addItem("All types", "all")
+        self.combo_seg_type.addItem("Plain text only", "only_plain")
+        self.combo_seg_type.addItem("Document state only", "only_doc")
+        gt.addWidget(self.combo_seg_type)
         gt.addWidget(QLabel("Output mode:"))
         self.combo_output_mode = QComboBox()
         self.combo_output_mode.addItem("Source replaced  (Articulate Storyline)", OutputMode.REPLACE)
@@ -283,6 +395,24 @@ class MainWindow(QMainWindow):
         )
         self.btn_translate.clicked.connect(self._start_translation)
         lv.addWidget(self.btn_translate)
+
+        self.btn_translate_all = QPushButton("Translate All Languages")
+        self.btn_translate_all.setFixedHeight(32)
+        self.btn_translate_all.setEnabled(False)
+        self.btn_translate_all.setStyleSheet(
+            "QPushButton{background:#1565C0;color:white;font-weight:bold;"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:disabled{background:#ccc;color:#888;}"
+            "QPushButton:hover:!disabled{background:#0D47A1;}"
+        )
+        self.btn_translate_all.clicked.connect(self._translate_all_languages)
+        lv.addWidget(self.btn_translate_all)
+        self.chk_parallel = QCheckBox("Run all languages in parallel")
+        self.chk_parallel.setToolTip(
+            "Start a separate worker thread for each language simultaneously.\n"
+            "No per-segment progress is shown; each language saves when done."
+        )
+        lv.addWidget(self.chk_parallel)
 
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.setFixedHeight(30)
@@ -430,10 +560,35 @@ class MainWindow(QMainWindow):
             self._project = project
             self._load_xlf(str(xlf))
             self._refresh_project_bar()
+            # Show language dialog if no languages configured yet
+            existing = self._project_metadata.get("target_langs", [])
+            if not existing:
+                dlg = TargetLanguagesDialog(parent=self)
+                if dlg.exec() == QDialog.Accepted:
+                    langs = dlg.selected_langs()
+                    if langs:
+                        self._project.save_metadata({"target_langs": langs})
+                        self._project_metadata = self._project.load_metadata()
+                        self._refresh_project_bar()
         except ValueError as exc:
             QMessageBox.critical(self, "Project error", str(exc))
         except Exception as exc:
             QMessageBox.critical(self, "Open project error", f"Could not open project:\n{exc}")
+
+    def _manage_languages(self) -> None:
+        if not self._project:
+            return
+        current = self._project_metadata.get("target_langs", [])
+        dlg = TargetLanguagesDialog(current_selection=current, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        langs = dlg.selected_langs()
+        self._project.save_metadata({"target_langs": langs})
+        self._project_metadata = self._project.load_metadata()
+        self._refresh_project_bar()
+        self.status_bar.showMessage(
+            f"Languages saved: {', '.join(langs) if langs else 'none'}"
+        )
 
     def _refresh_project_bar(self) -> None:
         if not self._project:
@@ -443,6 +598,7 @@ class MainWindow(QMainWindow):
         n_in  = len(info["input"])
         n_out = len(info["output"])
         g     = info["glossary"]
+        self._project_metadata = info.get("metadata", {})
         self._lbl_proj_name.setText(f"Project: {self._project.name}")
         self._lbl_proj_files.setText(
             f"input: {n_in} file{'s' if n_in!=1 else ''}  |  "
@@ -453,28 +609,40 @@ class MainWindow(QMainWindow):
             self._lbl_glossary.setText(f"📖 Glossary: {g['terms']} terms  ({g['size']})")
         else:
             self._lbl_glossary.setText("📖 No glossary")
+        langs = self._project_metadata.get("target_langs", [])
+        if langs:
+            self._lbl_proj_langs.setText(f"🌍 {',  '.join(langs)}")
+        else:
+            self._lbl_proj_langs.setText("🌍 No languages set")
         self._project_bar.setVisible(True)
+        has_langs = bool(langs) and self._parser is not None
+        self.btn_translate_all.setEnabled(has_langs)
 
     def _save_to_project_output(self) -> None:
         if not self._project or not self._parser:
             QMessageBox.information(self, "No project", "Open a project first.")
             return
         try:
-            xlf      = self._project.find_xlf()
-            stem     = xlf.stem if xlf else "translated"
-            out_path = self._project.output_dir / f"{stem}_translated.xlf"
+            lang     = self.combo_tgt.currentData()
+            out_path = self._project.output_path_for_lang(lang)
             mode     = self.combo_output_mode.currentData()
-            self._parser.set_target_language(self.combo_tgt.currentData())
+            self._parser.set_target_language(lang)
             self._parser.save(str(out_path), mode)
             total      = len(self._parser.segments)
             translated = sum(1 for s in self._parser.segments if s.target.strip())
+            # Update per-lang translation counts
+            meta = self._project.load_metadata()
+            segs_by_lang = meta.get("segments_translated", {})
+            if not isinstance(segs_by_lang, dict):
+                segs_by_lang = {}
+            segs_by_lang[lang] = translated
             self._project.save_metadata({
                 "source_lang":         self._parser.source_lang,
-                "target_lang":         self.combo_tgt.currentData(),
                 "segments_total":      total,
-                "segments_translated": translated,
+                "segments_translated": segs_by_lang,
                 "xlf_filename":        Path(self._filepath).name if self._filepath else "",
             })
+            self._project_metadata = self._project.load_metadata()
             self._refresh_project_bar()
             self.status_bar.showMessage(f"Saved → output/{out_path.name}")
         except Exception as exc:
@@ -538,10 +706,44 @@ class MainWindow(QMainWindow):
     def _compare_files(self) -> None:
         if not self._parser:
             return
+        from diff_dialog import DiffDialog
+        mode = self.combo_output_mode.currentData()
+
+        if self._project:
+            langs = self._project_metadata.get("target_langs", [])
+            available = {
+                lang: self._project.output_path_for_lang(lang)
+                for lang in langs
+                if self._project.output_path_for_lang(lang).exists()
+            }
+            if available:
+                if len(available) > 1:
+                    from PySide6.QtWidgets import QInputDialog
+                    lang, ok = QInputDialog.getItem(
+                        self, "Compare — Select Language",
+                        "Select translated language to compare:",
+                        list(available.keys()),
+                        editable=False,
+                    )
+                    if not ok:
+                        return
+                else:
+                    lang = list(available.keys())[0]
+                try:
+                    dlg = DiffDialog(
+                        self._parser.get_source_xml(),
+                        available[lang].read_text(encoding="utf-8"),
+                        parent=self,
+                    )
+                    dlg.setWindowTitle(f"XLF — Source vs {lang}")
+                    dlg.exec()
+                    return
+                except Exception as exc:
+                    QMessageBox.critical(self, "Compare error", f"Could not generate diff:\n{exc}")
+                    return
+
         try:
-            from diff_dialog import DiffDialog
-            mode = self.combo_output_mode.currentData()
-            dlg  = DiffDialog(
+            dlg = DiffDialog(
                 self._parser.get_source_xml(),
                 self._parser.get_translated_xml(mode),
                 parent=self,
@@ -549,6 +751,153 @@ class MainWindow(QMainWindow):
             dlg.exec()
         except Exception as exc:
             QMessageBox.critical(self, "Compare error", f"Could not generate diff:\n{exc}")
+
+    def _translate_all_languages(self) -> None:
+        if not self._project or not self._parser:
+            return
+        langs = self._project_metadata.get("target_langs", [])
+        if not langs:
+            QMessageBox.information(self, "No languages",
+                "No target languages configured.\nUse 'Languages…' to set them.")
+            return
+        model = self.combo_model.currentText()
+        if not model or model.startswith("("):
+            QMessageBox.warning(self, "No model", "Select a valid Ollama model first.")
+            return
+        if self.chk_parallel.isChecked():
+            self._translate_all_parallel(langs)
+        else:
+            self._pending_translate_langs = list(langs)
+            self._auto_save_on_finish = True
+            self._translate_next_pending()
+
+    def _translate_next_pending(self) -> None:
+        if not self._pending_translate_langs:
+            return
+        lang = self._pending_translate_langs.pop(0)
+        idx = self.combo_tgt.findData(lang)
+        if idx >= 0:
+            self.combo_tgt.setCurrentIndex(idx)
+        # Reload parser fresh from input
+        xlf = self._project.find_xlf()
+        if xlf is None:
+            self.status_bar.showMessage(f"No XLF found — skipping {lang}")
+            self._translate_next_pending()
+            return
+        try:
+            p = XlfParser()
+            p.load(str(xlf))
+            self._parser = p
+            self._populate_table()
+        except Exception as exc:
+            self.status_bar.showMessage(f"Error loading XLF for {lang}: {exc}")
+            self._translate_next_pending()
+            return
+        self._auto_save_on_finish = True
+        self._start_translation()
+
+    def _translate_all_parallel(self, langs: list) -> None:
+        """Start one worker thread per language simultaneously."""
+        xlf = self._project.find_xlf()
+        if xlf is None:
+            QMessageBox.warning(self, "No XLF", "No XLF file found in input/.")
+            return
+        model   = self.combo_model.currentText()
+        glossary = self._project.load_glossary()
+        client   = OllamaClient(base_url=self.edit_url.text().strip(), model=model)
+        src_lang = self.edit_src_lang.text().strip() or "English"
+
+        _DOC_STATE = ("x-DocumentState", "Articulate:DocumentState")
+        seg_filter = self.combo_seg_filter.currentData()
+        seg_type   = self.combo_seg_type.currentData()
+        empty_only = self.chk_empty_only.isChecked()
+
+        self._parallel_workers   = []
+        self._parallel_remaining = len(langs)
+        self.progress_bar.setRange(0, len(langs))
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+        self.btn_translate.setEnabled(False)
+        self.btn_translate_all.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
+        self.btn_open.setEnabled(False)
+
+        for lang in langs:
+            try:
+                p = XlfParser()
+                p.load(str(xlf))
+            except Exception as exc:
+                self.status_bar.showMessage(f"Failed to load XLF for {lang}: {exc}")
+                self._parallel_remaining -= 1
+                continue
+
+            segs = list(p.segments)
+            if empty_only:
+                segs = [s for s in segs if not s.target.strip()]
+            if seg_filter == "skip_alt":
+                segs = [s for s in segs if not s.unit_id.endswith(".AltText")]
+            elif seg_filter == "only_alt":
+                segs = [s for s in segs if s.unit_id.endswith(".AltText")]
+            if seg_type == "only_plain":
+                segs = [s for s in segs if s.unit_type not in _DOC_STATE]
+            elif seg_type == "only_doc":
+                segs = [s for s in segs if s.unit_type in _DOC_STATE]
+
+            worker = TranslationWorker(segs, client, src_lang, lang, glossary)
+            thread = QThread()
+            worker.moveToThread(thread)
+            thread.started.connect(worker.run)
+            worker.finished.connect(thread.quit)
+            # Capture lang and p by value
+            worker.finished.connect(
+                lambda lang=lang, p=p: self._on_parallel_lang_done(lang, p)
+            )
+            worker.error.connect(
+                lambda msg, t=thread: (t.quit(), self._on_error(msg))
+            )
+            self._parallel_workers.append((worker, thread, p, lang))
+            thread.start()
+
+        self.status_bar.showMessage(
+            f"Translating {len(langs)} languages in parallel…"
+        )
+
+    @Slot()
+    def _on_parallel_lang_done(self, lang: str, parser: XlfParser) -> None:
+        """Called when one parallel worker finishes. Saves output and checks if all done."""
+        if self._project:
+            try:
+                out_path = self._project.output_path_for_lang(lang)
+                mode = self.combo_output_mode.currentData()
+                parser.set_target_language(lang)
+                parser.save(str(out_path), mode)
+                total      = len(parser.segments)
+                translated = sum(1 for s in parser.segments if s.target.strip())
+                meta = self._project.load_metadata()
+                segs = meta.get("segments_translated", {})
+                if not isinstance(segs, dict):
+                    segs = {}
+                segs[lang] = translated
+                self._project.save_metadata({"segments_translated": segs})
+            except Exception as exc:
+                self.status_bar.showMessage(f"Save error for {lang}: {exc}")
+
+        self._parallel_remaining -= 1
+        done = len(self._parallel_workers) - self._parallel_remaining
+        self.progress_bar.setValue(done)
+        self.status_bar.showMessage(
+            f"Parallel translation: {done}/{len(self._parallel_workers)} languages done…"
+        )
+
+        if self._parallel_remaining <= 0:
+            self.progress_bar.setVisible(False)
+            self.btn_translate.setEnabled(True)
+            self.btn_translate_all.setEnabled(True)
+            self.btn_cancel.setEnabled(False)
+            self.btn_open.setEnabled(True)
+            self._parallel_workers = []
+            self._refresh_project_bar()
+            self.status_bar.showMessage("All languages translated.")
 
     def _format_file(self) -> None:
         src, _ = QFileDialog.getOpenFileName(
@@ -668,10 +1017,18 @@ class MainWindow(QMainWindow):
             segments = [s for s in segments if not s.unit_id.endswith(".AltText")]
         elif seg_filter == "only_alt":
             segments = [s for s in segments if s.unit_id.endswith(".AltText")]
+
+        _DOC_STATE = ("x-DocumentState", "Articulate:DocumentState")
+        seg_type = self.combo_seg_type.currentData()
+        if seg_type == "only_plain":
+            segments = [s for s in segments if s.unit_type not in _DOC_STATE]
+        elif seg_type == "only_doc":
+            segments = [s for s in segments if s.unit_type in _DOC_STATE]
+
         if not segments:
-            note = {"skip_alt": " (AltText excluded)", "only_alt": " (AltText only)"}.get(seg_filter, "")
             QMessageBox.information(self, "Nothing to do",
-                f"No segments to translate{note}.\nAll matching segments are already translated.")
+                "No segments to translate with the current filters.\n"
+                "All matching segments are already translated.")
             return
 
         glossary = self._project.load_glossary() if self._project else {}
@@ -685,6 +1042,7 @@ class MainWindow(QMainWindow):
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._on_progress)
         self._worker.unit_done.connect(self._on_unit_done)
+        self._worker.cache_stats.connect(self._on_cache_stats)
         self._worker.finished.connect(self._on_finished)
         self._worker.error.connect(self._on_error)
         self._worker.finished.connect(self._thread.quit)
@@ -703,6 +1061,8 @@ class MainWindow(QMainWindow):
     def _cancel_translation(self) -> None:
         if self._worker:
             self._worker.cancel()
+        for w, t, p, lang in self._parallel_workers:
+            w.cancel()
         self.status_bar.showMessage("Cancelling…")
         self.btn_cancel.setEnabled(False)
 
@@ -730,6 +1090,10 @@ class MainWindow(QMainWindow):
             self.table.blockSignals(False)
             self.table.resizeRowToContents(row)
 
+    @Slot(int, int)
+    def _on_cache_stats(self, cache_hits: int, total_segs: int) -> None:
+        self._last_cache_stats = (cache_hits, total_segs)
+
     @Slot()
     def _on_finished(self) -> None:
         self.progress_bar.setVisible(False)
@@ -738,10 +1102,23 @@ class MainWindow(QMainWindow):
         self.btn_open.setEnabled(True)
         total      = len(self._parser.segments)
         translated = sum(1 for s in self._parser.segments if s.target.strip())
-        self.status_bar.showMessage(
-            f"Done — {translated}/{total} segments translated.  "
-            "Use 'Save translated…' or 'Save to output/' to export."
-        )
+
+        if self._auto_save_on_finish and self._project:
+            self._auto_save_on_finish = False
+            self._save_to_project_output()
+
+        if self._pending_translate_langs:
+            self._translate_next_pending()
+        else:
+            cache_hits, total_segs = self._last_cache_stats
+            cache_msg = ""
+            if total_segs > 0 and cache_hits > 0:
+                pct = round(cache_hits * 100 / total_segs)
+                cache_msg = f"  |  cache: {cache_hits}/{total_segs} segmenti ({pct}% risparmiati)"
+            self.status_bar.showMessage(
+                f"Done — {translated}/{total} segments translated.{cache_msg}  "
+                "Use 'Save translated…' or 'Save to output/' to export."
+            )
 
     @Slot(str)
     def _on_error(self, msg: str) -> None:

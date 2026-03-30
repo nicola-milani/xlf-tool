@@ -36,10 +36,10 @@ import shutil
 import tempfile
 import uuid
 import sys as _sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import groupby
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -82,9 +82,10 @@ class Session:
     input_file:     Path           # uploaded XLF
     original_stem:  str            # filename without extension
     progress_queue: asyncio.Queue
-    project:        Optional[Project] = None   # set when a project ZIP was uploaded
-    cancelled:      bool = False
-    translate_task: Optional[asyncio.Task] = None
+    project:         Optional[Project] = None   # set when a project ZIP was uploaded
+    cancelled:       bool = False
+    translate_task:  Optional[asyncio.Task] = None
+    translated_langs: list = field(default_factory=list)
 
 
 _sessions: dict[str, Session] = {}
@@ -221,6 +222,7 @@ async def project_info(job_id: str):
         raise HTTPException(status_code=400, detail="Session has no project")
     info = await asyncio.to_thread(session.project.list_files)
     info["project_name"] = session.project.name
+    info["translated_langs"] = list(session.translated_langs)
     return info
 
 
@@ -250,22 +252,32 @@ async def list_models(url: str = "http://127.0.0.1:11434"):
 
 
 class TranslateRequest(BaseModel):
-    ollama_url:  str  = "http://127.0.0.1:11434"
-    model:       str  = "llama3.2"
-    target_lang: str  = "it-IT"
-    seg_filter:  str  = "skip_alt"
-    empty_only:  bool = True
-    output_mode: str  = "replace"
+    ollama_url:   str       = "http://127.0.0.1:11434"
+    model:        str       = "llama3.2"
+    target_lang:  str       = "it-IT"
+    seg_filter:   str       = "skip_alt"
+    seg_type:     str       = "all"        # all | only_plain | only_doc
+    empty_only:   bool      = True
+    output_mode:  str       = "replace"
+    target_langs: List[str] = []
+    parallel:     bool      = False
 
 
 def _translation_worker(
-    session: Session,
-    req:     TranslateRequest,
-    loop:    asyncio.AbstractEventLoop,
+    session:   Session,
+    req:       TranslateRequest,
+    loop:      asyncio.AbstractEventLoop,
+    send_done: bool = True,
 ) -> None:
     parser   = session.parser
     client   = OllamaClient(base_url=req.ollama_url, model=req.model)
     glossary = session.project.load_glossary() if session.project else {}
+
+    translation_cache: dict[str, str] = {}
+    cache_hits = 0
+    total_segs = 0
+
+    _DOC_STATE = ("x-DocumentState", "Articulate:DocumentState")
 
     segments = list(parser.segments)
     if req.empty_only:
@@ -274,6 +286,10 @@ def _translation_worker(
         segments = [s for s in segments if not s.unit_id.endswith(".AltText")]
     elif req.seg_filter == "only_alt":
         segments = [s for s in segments if s.unit_id.endswith(".AltText")]
+    if req.seg_type == "only_plain":
+        segments = [s for s in segments if s.unit_type not in _DOC_STATE]
+    elif req.seg_type == "only_doc":
+        segments = [s for s in segments if s.unit_type in _DOC_STATE]
 
     groups = [(uid, list(grp)) for uid, grp in groupby(segments, key=lambda s: s.unit_id)]
     total  = len(groups)
@@ -284,21 +300,32 @@ def _translation_worker(
         try:
             if len(group_segs) == 1:
                 seg   = group_segs[0]
+                total_segs += 1
                 gloss = glossary_exact(seg.source, glossary)
-                if gloss is not None:
+                if seg.source in translation_cache:
+                    translated = translation_cache[seg.source]
+                    cache_hits += 1
+                elif gloss is not None:
                     translated = gloss
+                    translation_cache[seg.source] = translated
                 else:
                     translated = client.translate(seg.source, parser.source_lang, req.target_lang)
                     translated = glossary_substitute(translated, glossary)
+                    translation_cache[seg.source] = translated
                 parser.update_target(seg.unit_id, translated, seg.pc_id)
                 done_segs = [{"unit_id": seg.unit_id, "pc_id": seg.pc_id, "target": translated}]
             else:
                 results: list = [None] * len(group_segs)
                 pending_idx   = []
                 for j, seg in enumerate(group_segs):
+                    total_segs += 1
                     gloss = glossary_exact(seg.source, glossary)
-                    if gloss is not None:
+                    if seg.source in translation_cache:
+                        results[j] = translation_cache[seg.source]
+                        cache_hits += 1
+                    elif gloss is not None:
                         results[j] = gloss
+                        translation_cache[seg.source] = gloss
                     else:
                         pending_idx.append(j)
                 if pending_idx:
@@ -310,6 +337,7 @@ def _translation_worker(
                     )
                     for j, t in zip(pending_idx, llm):
                         results[j] = glossary_substitute(t, glossary)
+                        translation_cache[group_segs[j].source] = results[j]
                 done_segs = []
                 for seg, translated in zip(group_segs, results):
                     parser.update_target(seg.unit_id, translated, seg.pc_id)
@@ -323,7 +351,252 @@ def _translation_worker(
             {"current": i + 1, "total": total, "unit_id": uid, "translations": done_segs},
         )
 
-    loop.call_soon_threadsafe(session.progress_queue.put_nowait, {"done": True})
+    # For project sessions, persist the translated file so it is included
+    # in the ZIP download.  (_translate_one_lang already does this for the
+    # multi-language path; this covers the single-language path.)
+    if session.project and not session.cancelled and req.target_lang:
+        output_mode = OutputMode.REPLACE if req.output_mode == "replace" else OutputMode.TARGET
+        lang        = req.target_lang
+        out_path    = session.project.output_path_for_lang(lang)
+        session.project.output_dir.mkdir(exist_ok=True)
+        try:
+            parser.set_target_language(lang)
+            parser.save(str(out_path), output_mode)
+            translated_count = sum(1 for s in parser.segments if s.target)
+            meta = session.project.load_metadata()
+            segs = meta.get("segments_translated", {})
+            if not isinstance(segs, dict):
+                segs = {}
+            segs[lang] = translated_count
+            session.project.save_metadata({"segments_translated": segs})
+            if lang not in session.translated_langs:
+                session.translated_langs.append(lang)
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                session.progress_queue.put_nowait,
+                {"error": f"Failed to save output: {exc}"},
+            )
+            return
+
+    if send_done:
+        loop.call_soon_threadsafe(
+            session.progress_queue.put_nowait,
+            {
+                "done": True,
+                "cache_hits": cache_hits,
+                "total_segs": total_segs,
+                "llm_calls": total_segs - cache_hits,
+            },
+        )
+
+
+def _translate_one_lang(
+    session:     Session,
+    req:         TranslateRequest,
+    lang:        str,
+    lang_idx:    int,
+    total_langs: int,
+    loop:        asyncio.AbstractEventLoop,
+    emit_progress: bool = True,
+) -> tuple[bool, int, int]:
+    """
+    Translate all segments for a single language, save output, emit lang_done.
+    Returns (success, cache_hits, total_segs).
+    """
+    parser = XlfParser()
+    try:
+        parser.load(str(session.input_file))
+    except Exception as exc:
+        loop.call_soon_threadsafe(
+            session.progress_queue.put_nowait,
+            {"error": f"Failed to load XLF for {lang}: {exc}"},
+        )
+        return False, 0, 0
+
+    client   = OllamaClient(base_url=req.ollama_url, model=req.model)
+    glossary = session.project.load_glossary() if session.project else {}
+
+    translation_cache: dict[str, str] = {}
+    cache_hits = 0
+    total_segs = 0
+
+    _DOC_STATE = ("x-DocumentState", "Articulate:DocumentState")
+    segments = list(parser.segments)
+    if req.empty_only:
+        segments = [s for s in segments if not s.target]
+    if req.seg_filter == "skip_alt":
+        segments = [s for s in segments if not s.unit_id.endswith(".AltText")]
+    elif req.seg_filter == "only_alt":
+        segments = [s for s in segments if s.unit_id.endswith(".AltText")]
+    if req.seg_type == "only_plain":
+        segments = [s for s in segments if s.unit_type not in _DOC_STATE]
+    elif req.seg_type == "only_doc":
+        segments = [s for s in segments if s.unit_type in _DOC_STATE]
+
+    groups = [(uid, list(grp)) for uid, grp in groupby(segments, key=lambda s: s.unit_id)]
+    total  = len(groups)
+
+    for i, (uid, group_segs) in enumerate(groups):
+        if session.cancelled:
+            return True, cache_hits, total_segs
+        try:
+            if len(group_segs) == 1:
+                seg   = group_segs[0]
+                total_segs += 1
+                gloss = glossary_exact(seg.source, glossary)
+                if seg.source in translation_cache:
+                    translated = translation_cache[seg.source]
+                    cache_hits += 1
+                elif gloss is not None:
+                    translated = gloss
+                    translation_cache[seg.source] = translated
+                else:
+                    translated = client.translate(seg.source, parser.source_lang, lang)
+                    translated = glossary_substitute(translated, glossary)
+                    translation_cache[seg.source] = translated
+                parser.update_target(seg.unit_id, translated, seg.pc_id)
+                done_segs = [{"unit_id": seg.unit_id, "pc_id": seg.pc_id, "target": translated}]
+            else:
+                results: list = [None] * len(group_segs)
+                pending_idx   = []
+                for j, seg in enumerate(group_segs):
+                    total_segs += 1
+                    gloss = glossary_exact(seg.source, glossary)
+                    if seg.source in translation_cache:
+                        results[j] = translation_cache[seg.source]
+                        cache_hits += 1
+                    elif gloss is not None:
+                        results[j] = gloss
+                        translation_cache[seg.source] = gloss
+                    else:
+                        pending_idx.append(j)
+                if pending_idx:
+                    pending_texts = [group_segs[j].source for j in pending_idx]
+                    llm = (
+                        [client.translate(pending_texts[0], parser.source_lang, lang)]
+                        if len(pending_texts) == 1
+                        else client.translate_batch(pending_texts, parser.source_lang, lang)
+                    )
+                    for j, t in zip(pending_idx, llm):
+                        results[j] = glossary_substitute(t, glossary)
+                        translation_cache[group_segs[j].source] = results[j]
+                done_segs = []
+                for seg, tr in zip(group_segs, results):
+                    parser.update_target(seg.unit_id, tr, seg.pc_id)
+                    done_segs.append({"unit_id": seg.unit_id, "pc_id": seg.pc_id, "target": tr})
+        except Exception as exc:
+            loop.call_soon_threadsafe(session.progress_queue.put_nowait, {"error": str(exc)})
+            return False, cache_hits, total_segs
+
+        if emit_progress:
+            loop.call_soon_threadsafe(
+                session.progress_queue.put_nowait,
+                {"current": i + 1, "total": total, "unit_id": uid, "translations": done_segs},
+            )
+
+    if session.cancelled:
+        return True
+
+    output_mode = OutputMode.REPLACE if req.output_mode == "replace" else OutputMode.TARGET
+    if session.project:
+        out_path = session.project.output_path_for_lang(lang)
+        session.project.output_dir.mkdir(exist_ok=True)
+        try:
+            parser.set_target_language(lang)
+            parser.save(str(out_path), output_mode)
+            translated_count = sum(1 for s in parser.segments if s.target)
+            meta = session.project.load_metadata()
+            segs = meta.get("segments_translated", {})
+            if not isinstance(segs, dict):
+                segs = {}
+            segs[lang] = translated_count
+            session.project.save_metadata({"segments_translated": segs})
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                session.progress_queue.put_nowait,
+                {"error": f"Failed to save {lang}: {exc}"},
+            )
+            return False, cache_hits, total_segs
+    else:
+        out_path = session.session_dir / f"{session.original_stem}_{lang}.xlf"
+        try:
+            parser.set_target_language(lang)
+            parser.save(str(out_path), output_mode)
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                session.progress_queue.put_nowait,
+                {"error": f"Failed to save {lang}: {exc}"},
+            )
+            return False, cache_hits, total_segs
+
+    session.parser = parser
+    session.translated_langs.append(lang)
+    loop.call_soon_threadsafe(
+        session.progress_queue.put_nowait,
+        {"lang_done": lang, "lang_index": lang_idx, "total_langs": total_langs},
+    )
+    return True, cache_hits, total_segs
+
+
+def _translation_worker_all_langs(
+    session: Session,
+    req:     TranslateRequest,
+    loop:    asyncio.AbstractEventLoop,
+) -> None:
+    """Run translation for each language in req.target_langs, saving output per lang."""
+    langs = req.target_langs
+
+    agg_cache_hits = 0
+    agg_total_segs = 0
+
+    if req.parallel:
+        import threading
+        threads = []
+        stats_list: list[tuple[int, int]] = []
+        stats_lock = threading.Lock()
+
+        def _run_lang(lang: str, lang_idx: int) -> None:
+            _, hits, segs = _translate_one_lang(session, req, lang, lang_idx, len(langs), loop, False)
+            with stats_lock:
+                stats_list.append((hits, segs))
+
+        for lang_idx, lang in enumerate(langs):
+            loop.call_soon_threadsafe(
+                session.progress_queue.put_nowait,
+                {"lang_start": lang, "lang_index": lang_idx, "total_langs": len(langs)},
+            )
+            t = threading.Thread(target=_run_lang, args=(lang, lang_idx), daemon=True)
+            threads.append(t)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for hits, segs in stats_list:
+            agg_cache_hits += hits
+            agg_total_segs += segs
+    else:
+        for lang_idx, lang in enumerate(langs):
+            if session.cancelled:
+                break
+            loop.call_soon_threadsafe(
+                session.progress_queue.put_nowait,
+                {"lang_start": lang, "lang_index": lang_idx, "total_langs": len(langs)},
+            )
+            ok, hits, segs = _translate_one_lang(session, req, lang, lang_idx, len(langs), loop, True)
+            agg_cache_hits += hits
+            agg_total_segs += segs
+            if not ok:
+                return
+
+    loop.call_soon_threadsafe(
+        session.progress_queue.put_nowait,
+        {
+            "done": True,
+            "cache_hits": agg_cache_hits,
+            "total_segs": agg_total_segs,
+            "llm_calls": agg_total_segs - agg_cache_hits,
+        },
+    )
 
 
 @app.post("/translate/{job_id}", status_code=202)
@@ -335,8 +608,13 @@ async def start_translate(job_id: str, req: TranslateRequest):
     while not session.progress_queue.empty():
         session.progress_queue.get_nowait()
     loop = asyncio.get_running_loop()
+    if req.target_langs:
+        session.translated_langs.clear()
+        worker_fn = _translation_worker_all_langs
+    else:
+        worker_fn = _translation_worker
     session.translate_task = asyncio.create_task(
-        asyncio.to_thread(_translation_worker, session, req, loop)
+        asyncio.to_thread(worker_fn, session, req, loop)
     )
     return {"status": "started"}
 
@@ -387,28 +665,60 @@ async def update_segment(job_id: str, body: UpdateRequest):
     return {"status": "ok"}
 
 
+class LanguagesRequest(BaseModel):
+    target_langs: List[str]
+
+
+@app.patch("/project/{job_id}/languages")
+async def update_project_languages(job_id: str, body: LanguagesRequest):
+    session = _get_session(job_id)
+    if session.project is None:
+        raise HTTPException(status_code=400, detail="Session has no project")
+    session.project.save_metadata({"target_langs": body.target_langs})
+    return {"status": "ok", "target_langs": body.target_langs}
+
+
 # ── Download translated XLF ───────────────────────────────────────────────────
 
 
 @app.get("/download/{job_id}")
-async def download(job_id: str, mode: str = "replace", target_lang: str = ""):
+async def download(job_id: str, mode: str = "replace", target_lang: str = "", lang: str = ""):
     session = _get_session(job_id)
     parser  = session.parser
 
-    if target_lang:
-        parser.set_target_language(target_lang)
+    effective_lang = lang or target_lang
+
+    # Serve pre-saved per-lang file if it exists (project or single-file)
+    if effective_lang:
+        if session.project:
+            out_path = session.project.output_path_for_lang(effective_lang)
+        else:
+            out_path = session.session_dir / f"{session.original_stem}_{effective_lang}.xlf"
+        if out_path.exists():
+            return FileResponse(
+                path=str(out_path),
+                media_type="application/xml",
+                filename=out_path.name,
+            )
+
+    if effective_lang:
+        parser.set_target_language(effective_lang)
 
     output_mode = OutputMode.REPLACE if mode == "replace" else OutputMode.TARGET
 
-    # Save to project output/ if available, else to session root
     if session.project:
         out_dir = session.project.output_dir
         out_dir.mkdir(exist_ok=True)
+        xlf = session.project.find_xlf()
+        stem_name = xlf.stem if xlf else session.original_stem
+        out_file = out_dir / (
+            f"{stem_name}_{effective_lang}.xlf" if effective_lang else "translated.xlf"
+        )
     else:
-        out_dir = session.session_dir
+        out_dir  = session.session_dir
+        out_file = out_dir / "translated.xlf"
 
-    out_file      = out_dir / "translated.xlf"
-    download_name = f"{session.original_stem}_translated.xlf"
+    download_name = f"{session.original_stem}_translated.xlf" if not effective_lang else out_file.name
 
     try:
         await asyncio.to_thread(parser.save, str(out_file), output_mode)
@@ -416,7 +726,7 @@ async def download(job_id: str, mode: str = "replace", target_lang: str = ""):
             total      = len(parser.segments)
             translated = sum(1 for s in parser.segments if s.target)
             session.project.save_metadata({
-                "target_lang":         target_lang or parser.target_lang,
+                "target_lang":         effective_lang or parser.target_lang,
                 "segments_total":      total,
                 "segments_translated": translated,
             })
@@ -434,12 +744,25 @@ async def download(job_id: str, mode: str = "replace", target_lang: str = ""):
 
 
 @app.get("/diff/{job_id}")
-async def get_diff(job_id: str, mode: str = "replace"):
+async def get_diff(job_id: str, mode: str = "replace", lang: str = ""):
     session     = _get_session(job_id)
     output_mode = OutputMode.REPLACE if mode == "replace" else OutputMode.TARGET
-    source_xml     = await asyncio.to_thread(session.parser.get_source_xml)
-    translated_xml = await asyncio.to_thread(session.parser.get_translated_xml, output_mode)
-    return {"source": source_xml, "translated": translated_xml}
+
+    source_xml = await asyncio.to_thread(session.parser.get_source_xml)
+
+    if lang and session.project:
+        out_path = session.project.output_path_for_lang(lang)
+        if not out_path.exists():
+            raise HTTPException(
+                status_code=404, detail=f"No translated file for language: {lang}"
+            )
+        translated_xml = out_path.read_text(encoding="utf-8")
+    else:
+        translated_xml = await asyncio.to_thread(
+            session.parser.get_translated_xml, output_mode
+        )
+
+    return {"source": source_xml, "translated": translated_xml, "lang": lang or None}
 
 
 # ── Session cleanup ───────────────────────────────────────────────────────────
